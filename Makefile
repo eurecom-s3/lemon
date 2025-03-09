@@ -18,7 +18,7 @@ static: STATIC=-static
 static: all
 
 loader:
-	clang $(CORE) -D $(TARGET_ARCH) -Wall -O2 lemon.c -o lemon -lbpf -lelf -lz -lzstd $(STATIC)
+	clang $(CORE) -D $(TARGET_ARCH) -Wall -O2 lemon.c mem.c disk.c -o lemon -lbpf -lelf -lz -lzstd $(STATIC)
 
 ebpf:
 	clang -target bpf $(CORE) -D $(TARGET_ARCH) -I/usr/include/linux -I/usr/include/$(ARCH)-linux-gnu \
