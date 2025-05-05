@@ -1,21 +1,39 @@
-#define PAGE_SIZE               4 * 1024                // The majority of CPU archs support this as little granule
-#define HUGE_PAGE_SIZE          2 * 1024 * 1024         // Same for huge pages
-#define TCP_PAYLOAD_SIZE        1024                    // Payload size using in network dump
-#define MAX_TCP_PAYLOAD_SIZE    1440                    // Maxium TCP payload size in IPv6 (less than IPv4)
+#include <stdbool.h>
+#include <errno.h>
 
-enum CMD_CODE {
-    SEND_PKT,       // Send packet without altering it
-    MODIFY_PKT,     // Replace the content of the packet with memory content
+#define MIN_MAJOR_LINUX         5 /* Minimium kernel version supported */
+#define MIN_MINOR_LINUX         5
+
+#define HUGE_PAGE_SIZE          2 * 1024 * 1024         /* Same for huge pages */
+#define DEFAULT_PORT            2304                    /* Default port used for networt dump */
+#define UDP_MAX_PAYLOAD         1024                    /* Maximum payload for UDP socket */
+
+struct options {
+    /* Modes */
+    bool disk_mode;
+    bool network_mode;
+
+    /* Disk options */
+    char *path;
+
+    /* Network options */
+    unsigned long address;
+    unsigned short port;
+    bool udp;
+
+    /* Options */
+    bool realtime;
+    bool fatal;
 };
 
-struct ram_range {
-    uintptr_t start;
-    uintptr_t end;
+struct mem_range {
+    unsigned long long start;
+    unsigned long long end;
 };
 
 struct ram_regions {
-    struct ram_range *regions;
-    size_t num_regions;
+    struct mem_range *regions;
+    unsigned int num_regions;
 };
 
 typedef struct __attribute__((packed)) {
@@ -28,5 +46,5 @@ typedef struct __attribute__((packed)) {
 
 struct read_mem_result {
     int ret_code;
-    uint8_t buf[HUGE_PAGE_SIZE];
+    unsigned char buf[HUGE_PAGE_SIZE];
 };

@@ -1,96 +1,230 @@
-#include <stdio.h>
 #include <unistd.h>
+#include <argp.h>
+#include <arpa/inet.h>
 #include <bpf/bpf.h>
-#include <bpf/libbpf.h>
-#include <errno.h>
-#include <sys/stat.h>
+#include <bpf/btf.h>
+#include <sys/utsname.h>
 
 #include "lemon.h"
-#include "lemon.ebpf.skel.h"
+#include "ebpf/mem.ebpf.skel.h"
 
-extern int get_memory_regions(struct ram_regions *restrict ram_regions, struct lemon_ebpf *restrict skel);
-extern int dump_on_disk(const char *const restrict dump_file, const struct ram_regions *restrict ram_regions);
+extern int get_memory_regions(struct ram_regions *restrict ram_regions, struct mem_ebpf *restrict skel);
+extern int dump_on_disk(const struct options *restrict opts, const struct ram_regions *restrict ram_regions);
+extern int dump_on_net(const struct options *restrict opts, const struct ram_regions *restrict ram_regions);
+extern int increase_priority(void);
+extern int init_mmap(struct mem_ebpf *restrict skel);
+extern void cleanup_mmap(void);
+extern int launch_cpu_stealers(void);
+extern int join_cpu_stealers(void);
+
+/* Constants needed for argparse */
+// TODO refine me
+static const struct argp_option options[] = {
+    {"disk",      'd', "PATH",      0, "Dump on disk", 0},
+    {"network",   'n', "ADDRESS",   0, "Dump through the network", 1},
+    {"port",      'p', "PORT",      0, "Specify port number", 1},
+    {"udp",       'u', 0,           0, "Use UDP instead of TCP", 1},
+    {"realtime",  'r', 0,           0, "Use realtime priority", 2},
+    {"fatal",     'f', 0,           0, "Interrupt the dump in case of memory read error", 2},
+    {0}
+};
+static const char doc[] = "Lemon - An eBPF Memory Dump Tool for x64 and ARM64 Linux and Android";
 
 /*
- *  load_ebpf_progs() - load and attach eBPF programs
- *  @skel: eBPF skeleton
- * 
+ * load_ebpf_mem_progs() - Initialize and attach eBPF programs for memory access
+ * @skel: Output pointer to the initialized mem_ebpf skeleton
+ *
+ * Opens, loads, attaches the eBPF programs, and sets up shared memory. 
+ * Returns 0 on success or a negative error code on failure.
  */
-int load_ebpf_progs(struct lemon_ebpf **restrict skel) {
+static int load_ebpf_mem_progs(struct mem_ebpf **restrict skel) {
+    int ret;
+
     /* Open the BPF object file */
-    if (!(*skel = lemon_ebpf__open()))
-    {
-        fprintf(stderr, "Failed to open BPF skeleton\n");
+    *skel = mem_ebpf__open();
+    if(!skel) {
+        perror("Failed to open BPF skeleton");
         return errno;
     }
 
     /* Load the BPF objectes */
-    if ((lemon_ebpf__load(*skel)))
-    {
-        fprintf(stderr, "Failed to load BPF object: %d\n", errno);
+    if (mem_ebpf__load(*skel)) {
+        perror("Failed to load BPF object");
         return errno;
     }
 
     /* Attach the uprobe to the 'read_kernel_memory' function in the current executable */
-    if (lemon_ebpf__attach(*skel))
-    {
+    if (mem_ebpf__attach(*skel)) {
         fprintf(stderr, "Failed to attach program\n");
         return errno;
     }
 
-    #ifdef DEBUG
-        printf("BPF program attached\n");
-    #endif
+    /* Create the mmap */
+    if((ret = init_mmap(*skel))) {
+        return ret;
+    }
 
     return 0;
 }
 
+/*
+ * parse_opt() - Argument parser callback for argp
+ * @key: Option key
+ * @arg: Option argument string
+ * @state: Argp parser state
+ *
+ * Parses command-line arguments into the options struct. Validates IP address and port,
+ * enforces mutual exclusivity between disk and network modes, and ensures required options
+ * are present based on the selected mode.
+ * Returns 0 on success or ARGP_ERR_UNKNOWN for unrecognized options.
+ */
+static error_t parse_opt(int key, char *arg, struct argp_state *state) {
+    struct options *opts = state->input;
+    struct in_addr addr;
+    
+    switch (key) {
+        case 'n':
+	    if (inet_pton(AF_INET, arg, &addr) != 1) {
+                argp_error(state, "Invalid IP address format");
+            }
+            opts->address = addr.s_addr;
+            opts->network_mode = true;
+            break;
+        case 'p':
+            opts->port = atoi(arg);
+            if (opts->port <= 0 || opts->port > 65535) {
+                argp_error(state, "Port must be between 1 and 65535");
+            }
+            break;
+        case 'd':
+            opts->disk_mode = true;
+            opts->path = arg;
+            break;
+        case 'r':
+            opts->realtime = true;
+            break;
+        case 'f':
+            opts->fatal = true;
+            break;
+        case 'u':
+            opts->udp = true;
+            perror("To be implemented...");
+            exit(EXIT_FAILURE);
+        case ARGP_KEY_END:
+            /* Validate mutual exclusivity of disk vs net dump */
+            if (opts->network_mode && opts->disk_mode) {
+                argp_error(state, "Disk and network mode are mutually exclusive");
+            }
+            
+            /* Ensure at least one mode is specified */
+            if (!opts->network_mode && !opts->disk_mode) {
+                argp_error(state, "Either network mode or disk mode must be specified");
+            }
+            break;
+        default:
+            return ARGP_ERR_UNKNOWN;
+    }
+    return 0;
+}
+
+/*
+ * check_kernel_version() - Checks if the running Linux kernel version support all the feature requested
+ * Return:
+ *   1 if kernel version is valid
+ *   0 if kernel version does not support all the features
+ *   < 0 on failure
+ */
+static int check_kernel_version() {
+    struct utsname buffer;
+    int major = 0, minor = 0, patch = 0;
+
+    if (uname(&buffer) != 0) {
+        perror("Fail to get Linux kernel version");
+        return -errno;
+    }
+    sscanf(buffer.release, "%d.%d.%d", &major, &minor, &patch);
+    if(errno) {
+        perror("Fail to parse Linux version");
+        return -errno;
+    }
+
+    return (major >= MIN_MAJOR_LINUX) && (minor >= MIN_MINOR_LINUX);
+}
+
 int main(int argc, char **argv)
 {
-    struct lemon_ebpf *skel = NULL;
+    struct mem_ebpf *skel = NULL;
     struct ram_regions ram_regions;
-    int err;
-
-    struct stat stat_tmp;
+    struct options opts = {0};
+    struct argp argp = {options, parse_opt, "", doc};
+    int ret;
 
     /* Check if is running as root */
     if(getuid() != 0) {
-        printf("Must be run as root\n");
-        return 0;
+        fprintf(stderr, "Must be run as root\n");
+        return EXIT_FAILURE;
     }
 
-    /* Parameters */
-    if(argc < 2) {
-        printf("Usage: lemon <output file>\n");
-        return 0;
+    /* Check Linux version */
+    if((ret = check_kernel_version()) < 0) return EXIT_FAILURE;
+    if(!ret) {
+        fprintf(stderr, "Linux version is too old. Minimum required version: %d.%d\n", MIN_MAJOR_LINUX, MIN_MINOR_LINUX);
+        return EXIT_FAILURE;
     }
 
     /* Check for eBPF support */
     bpf_prog_load(BPF_PROG_TYPE_UNSPEC, NULL, NULL, NULL, 0, NULL);
 	if(errno == ENOSYS) {
-        printf("eBPF not supported by this kernel :( %d\n", errno);
-        return 1;
+        perror("eBPF not supported by this kernel :(");
+        return EXIT_FAILURE;
     }
 
-    /* Check for eBPF CORE support */
-    if(stat("/sys/kernel/btf/vmlinux", &stat_tmp)) {
-        printf("eBPF CORE not supported by this kernel.\n");
-        return 1;
+    #ifdef CORE
+        /* Check for eBPF CORE support */
+        struct btf *vmlinux_btf = btf__load_vmlinux_btf();
+        if (!vmlinux_btf) {
+            perror("eBPF CO-RE not supported by this kernel :(");
+            return EXIT_FAILURE;
+        }
+        btf__free(vmlinux_btf);
+    #endif
+
+    /* Parse the arguments */
+    opts.port = DEFAULT_PORT;
+    argp_parse(&argp, argc, argv, 0, 0, &opts);
+
+    /* Increase process priority and lauch stealers */
+    if(opts.realtime) {
+        ret = increase_priority();
+        if (ret) return ret;
+
+        ret = launch_cpu_stealers();
+        if(ret) return ret;
     }
 
-    /* Load eBPF progs */
-    if((err = load_ebpf_progs(&skel))) return err;
-    
+    /* Load eBPF progs that read memory */
+    if((ret = load_ebpf_mem_progs(&skel))) return ret;
+
     /* Determine the memory dumpable regions */
-    if((err = get_memory_regions(&ram_regions, skel))) goto cleanup;
+    if((ret = get_memory_regions(&ram_regions, skel))) goto cleanup;
 
-    /* Dump the content of the memory on a file */
-    if((err = dump_on_disk(argv[1], &ram_regions))) goto cleanup;
-    
-    
+    /* Dump on a file */
+    if(opts.disk_mode) {
+        if((ret = dump_on_disk(&opts, &ram_regions))) goto cleanup;
+    }
+
+    /* Dump using TCP packets */
+    else if(opts.network_mode) { 
+        if((ret = dump_on_net(&opts, &ram_regions))) goto cleanup;
+    }
+
     /* Cleanup: close BPF object */
     cleanup:
-        if(skel) lemon_ebpf__destroy(skel);
+        if(skel) {
+            cleanup_mmap();
+            mem_ebpf__destroy(skel);
+        }
+        join_cpu_stealers();
 
-    return 0;
+    return EXIT_SUCCESS;
 }

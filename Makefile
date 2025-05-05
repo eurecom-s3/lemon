@@ -1,33 +1,66 @@
-STATIC ?=
-CORE ?=
+# Optional build flags (can be overridden via command line)
+STATIC ?=  # Default is not static
+CORE ?= 1  # Default to CORE=1, can be disabled via CORE=0
 
+# System and architecture detection
 ARCH := $(shell uname -m)
+BPFTOOL := bpftool
 
-# For now supports only x86-64 and ARM64
+# Detect architecture for eBPF
 ifeq ($(ARCH), x86_64)
     TARGET_ARCH := __TARGET_ARCH_x86
 else ifeq ($(ARCH), aarch64)
     TARGET_ARCH := __TARGET_ARCH_arm64
+else
+    $(error Unsupported architecture: $(ARCH))
 endif
 
-all: CORE=-D CORE 
-all: ebpf loader
+# Define compiler and flags
+CLANG   := clang
+CFLAGS  := -Wall -O2 -D$(TARGET_ARCH)
+LDFLAGS := -lbpf -lelf -lz -lzstd
 
-static: CORE=1 
-static: STATIC=-static 
-static: all
+# Conditional flags
+ifeq ($(CORE), 1)
+    CFLAGS  += -DCORE
+    BPF_CORE_FLAG := -DCORE
+endif
 
-loader:
-	clang $(CORE) -D $(TARGET_ARCH) -Wall -O2 lemon.c mem.c disk.c -o lemon -lbpf -lelf -lz -lzstd $(STATIC)
+ifeq ($(STATIC), 1)
+    LDFLAGS += -static
+endif
 
-ebpf:
-	clang -target bpf $(CORE) -D $(TARGET_ARCH) -I/usr/include/linux -I/usr/include/$(ARCH)-linux-gnu \
-	      -Wall -O2 -g -c lemon.ebpf.c -o lemon.ebpf.o
-	llvm-strip -g lemon.ebpf.o
-	bpftool gen skeleton lemon.ebpf.o > lemon.ebpf.skel.h
+# Files
+LOADER_SRCS := lemon.c cpu_stealer.c mem.c dump.c disk.c net.c
+LOADER_BIN  := lemon.$(ARCH)
+BPF_SRC     := ebpf/mem.ebpf.c
+BPF_OBJ     := ebpf/mem.ebpf.o
+BPF_SKEL    := ebpf/mem.ebpf.skel.h
 
+# Default target: If CORE is enabled, make vmlinux first, then compile eBPF and loader
+all: $(if $(filter 1,$(CORE)), vmlinux) $(BPF_OBJ) $(LOADER_BIN)
+
+# Build eBPF object and generate skeleton
+$(BPF_OBJ): $(BPF_SRC)
+	$(CLANG) -target bpf -D$(TARGET_ARCH) $(BPF_CORE_FLAG) -I/usr/include/linux -I/usr/include/$(ARCH)-linux-gnu \
+	        -Wall -O2 -g -c $< -o $@
+	llvm-strip -g $(BPF_OBJ)
+	$(BPFTOOL) gen skeleton $(BPF_OBJ) > $(BPF_SKEL)
+
+# Build the loader (compiled before eBPF program)
+$(LOADER_BIN): $(LOADER_SRCS)
+	$(CLANG) $(CFLAGS) $^ -o $@ $(LDFLAGS)
+
+# Dump vmlinux BTF as C header (only if CORE is enabled)
 vmlinux:
-	bpftool btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h
+	$(BPFTOOL) btf dump file /sys/kernel/btf/vmlinux format c > vmlinux.h
 
+# Static target for convenience
+static:
+	$(MAKE) STATIC=1
+
+# Clean
 clean:
-	rm -f *.o *.bc vmlinux.h lemon.ebpf.skel.h lemon
+	rm -f $(LOADER_BIN) $(BPF_OBJ) $(BPF_SKEL) vmlinux.h
+
+.PHONY: all static clean vmlinux

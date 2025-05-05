@@ -1,85 +1,169 @@
-#include <stdio.h>
-#include <stdint.h>
-#include <errno.h>
+#include <sys/stat.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 #include "lemon.h"
-#include "lemon.ebpf.skel.h"
+#include "ebpf/mem.ebpf.skel.h"
 
-/* Offset used to perform physical to virtual address translation */
-uintptr_t phy_to_virt_offset;
+/* File descriptor and mmap() pointer associated to the eBPF map.*/
+int read_mem_result_fd;
+struct read_mem_result *read_mem_result;
 
-/* Userland copy of the memory channel content */
-struct read_mem_result read_mem_result;
-
-/* Memory channel map   */
-struct bpf_map *read_mem_map;
+/* Offset used to perform physical to virtual address translation in x86 and ARM64 */
+#ifdef __TARGET_ARCH_x86
+    static uintptr_t page_offset_base;
+#elif __TARGET_ARCH_arm64
+    static int64_t memstart_addr;
+    #ifndef CORE
+        static uintptr_t page_offset;
+    #endif
+#endif
 
 /*
- * phys_to_virt() - it translates a physical address to a virtual one using kernel direct mapping.
- * @phy_addr: a pointer to a string containing the name of the file to look up.
+ * init_mmap() - Initializes a shared memory mapping for reading memory results from eBPF
+ * @skel: eBPF skeleton containing the map to be used
  *
- * The translation method depends on the architecture.
- * At the moment we support only x86_64 and ARM64.
- * 
+ * Retrieves the file descriptor for the BPF map and creates a shared memory mapping
+ * to allow user space to access the memory read results.
  */
-static inline uintptr_t phys_to_virt(const uintptr_t phy_addr) {
+int init_mmap(struct mem_ebpf *restrict skel) {
+    
+    read_mem_result_fd = bpf_map__fd(skel->maps.read_mem_array_map);
+    if(read_mem_result_fd < 0)
+        return read_mem_result_fd;
+
+    read_mem_result = (struct read_mem_result *)mmap(NULL, sizeof(struct read_mem_result), PROT_READ | PROT_WRITE, MAP_SHARED, read_mem_result_fd, 0);
+    if (read_mem_result == MAP_FAILED) {
+        return errno;
+    }
+
+    return 0;
+}
+
+/*
+ * cleanup_mmap() - Unmaps the shared memory region used for memory memory.
+ */
+void cleanup_mmap() {
+    if(read_mem_result) munmap(read_mem_result, sizeof(struct read_mem_result));
+}
+
+/*
+ * phys_to_virt() - Convert a physical address to a virtual address using direct mapping
+ * @phy_addr: Physical address to translate
+ *
+ * Performs architecture-specific translation using kernel direct mapping.
+ * Currently supports x86_64 and ARM64 only.
+ */
+
+uintptr_t phys_to_virt(const uintptr_t phy_addr) {
     #ifdef __TARGET_ARCH_x86
-        return phy_addr + phy_to_virt_offset;
+        return phy_addr + page_offset_base;
     #elif __TARGET_ARCH_arm64
-        return (phy_addr - phy_to_virt_offset) | 0xffff000000000000;
+        uintptr_t vaddr = phy_addr - memstart_addr;
+        #ifndef CORE
+            /* If in CO-RE mode the translation will be finished in the eBPF program */
+            vaddr |= page_offset;
+        #endif
+        return vaddr;
     #else
         return phy_addr;
     #endif
 }
 
 /*
- *  read_kernel_memory() - it triggers the eBPF program and reads virtual memory area
- *  @addr: virtual address of the memory area to be read
- *  @size: size of the memory area to read
- *  @data: pointer to the output data
- * 
- *  When we call this function the eBPF UProbe program is triggered, 
- *  reading the corresponding memory region in kernel space.
- *  We force non inlining and no optimization to permit easy UProbe attach.
- * 
+ * read_kernel_memory() - Trigger eBPF UProbe to read kernel virtual memory
+ * @addr: Virtual address of the memory region to read
+ * @size: Size of the memory region to read
+ * @data: Pointer to store the output data
+ *
+ * This function triggers an eBPF UProbe to read the specified memory region in kernel space.
+ * The function is marked with `noinline` and `optnone` to ensure the code is not optimized or inlined by the compiler.
  */
-int __attribute__((noinline, optnone)) read_kernel_memory(const uintptr_t addr, const size_t size, uint8_t **restrict data)
+int __attribute__((noinline, optnone)) read_kernel_memory(const uintptr_t addr, const size_t size, __u8 **restrict data)
 {
-    int key = 0;
-
-    if (bpf_map__lookup_elem(read_mem_map, &key, sizeof(int), &read_mem_result, sizeof(struct read_mem_result), 0))
-    {
-        fprintf(stderr, "Failed to read read_mem_map: %d\n", errno);
-        data = NULL;
-        return errno;
-    }
-
-    if(read_mem_result.ret_code) {
-        fprintf(stderr, "Error reading kernel memory at address 0x%lx, size: 0x%zx\n", addr, size);
-        data = NULL;
-        return read_mem_result.ret_code;
-    }
-
-    *data = read_mem_result.buf;
-    return 0;
+    *data = read_mem_result->buf;
+    return read_mem_result->ret_code;
 }
 
+#if defined(__TARGET_ARCH_arm64) && !defined(CORE)
+   /*
+    * is_mmap_respecting_address() - Check if memory mapping respects the given address
+    * @addr: The address to check
+    *
+    * Attempts to mmap a 1-byte region at the specified address. If the mmap operation is successful 
+    * and the address is valid (greater than or equal to the specified address), the function returns 
+    * true. Otherwise, it returns false.
+    */
+    static bool is_mmap_respecting_address(void *addr) {
+        unsigned int size = getpagesize();
+        void *mapped_addr = mmap(addr, size, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+
+        if (mapped_addr == MAP_FAILED) {
+            return false;
+        }
+        
+        if (munmap(mapped_addr, size) == -1) {
+            return false;
+        }
+
+        /* Check if the mapped address is the desired address, also greater is ok */
+        if (mapped_addr >= addr) {
+            return true;
+        } else {
+            return false;
+        }
+    }
+
+   /*
+    * arm64_vabits_actual() - Determine the actual virtual address bits for ARM64
+    *
+    * Determines the number of virtual address bits used by the system on ARM64 
+    * by checking the mmap behavior for various address values defined in arch/arm64/Kconfig. 
+    * The function first checks the most common virtual address bit settings (48 and 52), 
+    * then falls back to testing other possible values (47, 42, 39, 36) if necessary. 
+    * Returns the number of virtual address bits used (e.g., 48, 52).
+    */
+    static unsigned long arm64_vabits_actual() {
+        unsigned long vabits = 0;
+
+        /* VA_BITS = 48 is probably the most common check it first */
+        if (is_mmap_respecting_address((void*)(1ul << 47))) {
+            if (is_mmap_respecting_address((void*)(1ul << 51))) {
+                vabits = 52;
+            } else {
+                vabits = 48;
+            }
+        } else {
+            /* Remaining cases */
+            const unsigned long va_bits[] = {47, 42, 39, 36};
+            for(int i = 0; i < 4; ++i) {
+                if (is_mmap_respecting_address((void*)(1ul << (va_bits[i] - 1)))) {
+                    vabits = va_bits[i];
+                    break;
+                }
+            }
+        }
+
+        return vabits;
+    }
+#endif
+
 /*
- *  get_phys_to_virt_offset() - it reads the phys_to_virt_offset that permit direct mapping translation
- *                              of physical addresses in virtual ones.
- * 
- *  It looks for the kernel symbol in /proc/kallsyms that contains the offset used in different
- *  architectures to translate physical to virtual addresses using direct mapping. 
- * 
+ * init_phys_to_virt() - Initialize the physical-to-virtual address translation offset
+ *
+ * Opens /proc/kallsyms, searches for the appropriate symbol (e.g., "page_offset_base" or 
+ * "memstart_addr") based on architecture, and retrieves the physical-to-virtual address 
+ * translation offset. Returns 0 on success, or an error code on failure.
  */
-static int get_phys_to_virt_offset()
+static int init_phys_to_virt()
 {
     FILE *fp;
     char line[256];
     uintptr_t kallsyms_symb_addr = 0;
     int err;
-    uint8_t *data = NULL;
+    __u8 *data = NULL;
 
+    /* Symbol to be located in /proc/kallsyms */
     #ifdef __TARGET_ARCH_x86
         char *symbol = "page_offset_base";
     #elif __TARGET_ARCH_arm64
@@ -94,38 +178,61 @@ static int get_phys_to_virt_offset()
         return errno;
     }
 
+    /* Look for the symbol */
     while (fgets(line, sizeof(line), fp))
         if (strstr(line, symbol) && (sscanf(line, "%lx", &kallsyms_symb_addr) == 1)) break;
-    fclose(fp);
+    if(fclose(fp)) {
+        perror("Fail to close /proc/kallsyms");
+        return errno;
+    }
 
     if (!kallsyms_symb_addr)
     {
         fprintf(stderr, "%s not found in /proc/kallsyms\n", symbol);
-        return EINVAL;
+        return EIO;
     }
 
-    #ifdef DEBUG
-        printf("Symbol %s at 0x%lx\n", symbol, kallsyms_symb_addr);
-    #endif
-
+    /* Make sure we can use the same read for signed and unsigned offsets (arm/intel) */
+    _Static_assert(sizeof(uintptr_t) == sizeof(int64_t), "sizeof(uintptr_t) != sizeof(int64_t)");
+    
     /* Read the content of the kernel symbol to get the offset of direct mapping region */
     if((err = read_kernel_memory(kallsyms_symb_addr, sizeof(uintptr_t), &data))) return err;
-    phy_to_virt_offset = *((uintptr_t *)data);
+    
+    // TODO Pass to _stext trick for x64
 
-    #ifdef DEBUG
-        printf("Direct mapping offset: 0x%lx\n", phy_to_virt_offset);
+    /* We are able now to translate phys to virt addresses for X64. ARM64 instead is more complex 
+     * and require two values, one of the two (CONFIG_ARM64_VA_BITS) available only in the eBPF 
+     * CO-RE program or determined at runtime here for non CO-RE ones.
+     */
+    #ifdef __TARGET_ARCH_x86
+        page_offset_base = *((uintptr_t *)data);
+    
+    #elif __TARGET_ARCH_arm64
+        memstart_addr = *((int64_t *)data);
+        
+        #ifndef CORE
+            /* If the kernel is not CORE we determibne the CONFIG_ARM64_VA_BITS using the runtime value. */
+            unsigned long vabits = arm64_vabits_actual();
+            if (vabits == 0) {
+                perror("Failed to determine virtual address bits, defaulting to 48");
+                vabits = 48;
+            }
+            page_offset = -1L << vabits;
+        #endif
+    
     #endif
 
     return 0;
 }
 
 /*
- *  get_iomem_regions() - it reads and stores System RAM virtual address ranges from /proc/iomem 
- *  @regions: pointer that will contains all valid regions
+ * get_iomem_regions() - Parse /proc/iomem to extract "System RAM" regions
+ * @ram_regions: Pointer to store the extracted RAM regions
  *
- *  It looks for "System RAM" memory regions in /proc/iomem, translate the start and end physical
- *  addresses in virtual ones and saves them into the ram_regions array.
- * 
+ * Opens /proc/iomem, searches for "System RAM" regions, and populates the provided
+ * ram_regions struct with the start and end addresses of each region. The function
+ * reallocates memory as needed to accommodate additional regions. Returns 0 on success,
+ * or an error code on failure.
  */
 static int get_iomem_regions(struct ram_regions *restrict ram_regions)
 {
@@ -146,7 +253,7 @@ static int get_iomem_regions(struct ram_regions *restrict ram_regions)
     ram_regions->num_regions = 0;
     slot_availables = 8;
 
-    ram_regions->regions = (struct ram_range *)malloc(slot_availables * sizeof(struct ram_range));
+    ram_regions->regions = (struct mem_range *)malloc(slot_availables * sizeof(struct mem_range));
     if (!ram_regions->regions)
     {
         perror("Failed to allocate memory for RAM ranges");
@@ -164,7 +271,7 @@ static int get_iomem_regions(struct ram_regions *restrict ram_regions)
             {
                 slot_availables *= 2;
                 ram_regions->regions = 
-                    (struct ram_range *)realloc(ram_regions->regions, slot_availables * sizeof(struct ram_range));
+                    (struct mem_range *)realloc(ram_regions->regions, slot_availables * sizeof(struct mem_range));
                 if (!ram_regions->regions)
                 {
                     perror("Failed to reallocate memory for RAM ranges");
@@ -174,35 +281,96 @@ static int get_iomem_regions(struct ram_regions *restrict ram_regions)
             }
 
             /* Convert to virtual addresses */
-            (ram_regions->regions)[ram_regions->num_regions].start = phys_to_virt(start);
-            (ram_regions->regions)[ram_regions->num_regions].end = phys_to_virt(end);
+            (ram_regions->regions)[ram_regions->num_regions].start = start;
+            (ram_regions->regions)[ram_regions->num_regions].end = end;
             (ram_regions->num_regions)++;
             
         }
     }
-    fclose(fp);
+    if(fclose(fp)) {
+        perror("Fail to close /proc/iomem");
+        return errno;
+    }
 
     return 0;
 }
 
 /*
- *  get_memory_regions() - it initializes the physical to virtual address translation mechanism
-    and returns System RAM virtual address ranges from /proc/iomem 
- *  @regions: pointer that will contains all valid regions
- *  @skel: eBPF skeleton
+ * toggle_kptr() - Toggle the kernel.kptr_restrict sysctl setting
  *
- *  It determines the offset for physical to virtual address translation and then returns the
- *  memory regions array.
- * 
+ * Reads and toggles /proc/sys/kernel/kptr_restrict between 0 and its original value.
+ * Caches the original value on first call. Returns 0 on success, or an error code on failure.
  */
-int get_memory_regions(struct ram_regions *restrict ram_regions, struct lemon_ebpf *restrict skel) {
+static int toggle_kptr(void) {
+    static int orig_kptr_status = - 1;
+
+    struct stat stat_tmp;
+    FILE *kptr_fd;
+    int current_kptr_status, new_kptr_status, err = 0;
+
+    /* If kptr_restrict does not exists (?) do nothing */
+    if(stat("/proc/sys/kernel/kptr_restrict", &stat_tmp)) {
+        perror("/proc/sys/kernel/kptr_restrict not found");
+        return 0;
+    }
+
+    /* Open the file */
+    if(!(kptr_fd = fopen("/proc/sys/kernel/kptr_restrict", "r+"))) {
+        perror("Failed to open /proc/sys/kernel/kptr_restrict");
+        return errno;
+    }
+    
+    /* Read current kptr_status */
+    if(fscanf(kptr_fd, "%d", &current_kptr_status) == EOF) {
+        perror("Fail to read /proc/sys/kernel/kptr_restrict");
+        err = errno;
+        goto cleanup;
+    }
+    rewind(kptr_fd);
+
+    /* Save the original value */
+    if(orig_kptr_status == -1) {
+        orig_kptr_status = current_kptr_status;
+    }
+
+    /* Toggle the kptr_restrict value*/
+    new_kptr_status = (current_kptr_status > 0) ? 0 : orig_kptr_status;
+    if(fprintf(kptr_fd, "%d", new_kptr_status) < 0) {
+        err = EIO;
+        goto cleanup;
+    }
+
+    cleanup:
+    if(kptr_fd) {
+        if(fclose(kptr_fd)) {
+            perror("Fail to close /proc/sys/kernel/kptr_restrict");
+            return errno;
+        }
+    }
+
+    return err;
+}
+
+/*
+ * get_memory_regions() - Initialize phys-to-virt translation and extract System RAM regions
+ * @ram_regions: Output pointer for storing valid memory regions
+ * @skel: eBPF skeleton used for memory access
+ *
+ * Temporarily disables kptr restriction, initializes the physical-to-virtual address mapping,
+ * restores the restriction, and retrieves System RAM virtual address ranges from /proc/iomem.
+ * Returns 0 on success or an error code on failure.
+ */
+int get_memory_regions(struct ram_regions *restrict ram_regions, struct mem_ebpf *restrict skel) {
     int err;
 
-    /* Get the read_mem_map */
-    read_mem_map = skel->maps.read_mem_array_map; 
+    /* Disable KPTR censorship */
+    if((err = toggle_kptr())) return err;
 
     /* Determine the offset for translations */
-    if((err = get_phys_to_virt_offset())) return err;
+    if((err = init_phys_to_virt())) return err;
+
+    /* Restore original KPTR censhorship level*/
+    if((err = toggle_kptr())) return err;
 
     return get_iomem_regions(ram_regions);
 }
