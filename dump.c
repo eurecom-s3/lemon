@@ -84,6 +84,7 @@ int dump(const struct options *restrict opts, const struct ram_regions *restrict
     int ret = 0;
 
     /* Prepare the LiME header */
+    memset(&header, '\x00', sizeof(header));
     header.magic = 0x4C694D45;
     header.version = 1;
 
