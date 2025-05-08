@@ -148,7 +148,7 @@ static int check_kernel_version() {
         return -errno;
     }
 
-    return (major >= MIN_MAJOR_LINUX) && (minor >= MIN_MINOR_LINUX);
+    return (major > MIN_MAJOR_LINUX) || ((major == MIN_MAJOR_LINUX) && (minor >= MIN_MINOR_LINUX));
 }
 
 int main(int argc, char **argv)
