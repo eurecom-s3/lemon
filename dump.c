@@ -94,12 +94,14 @@ int dump(const struct options *restrict opts, const struct ram_regions *restrict
         region_start = ram_regions->regions[i].start;
         region_end = ram_regions->regions[i].end;
 
-        /* Write the LiMe header for that RAM region to the file */
-        header.s_addr = ram_regions->regions[i].start;
-        header.e_addr = ram_regions->regions[i].end;
-        if ((ret = write_f(args, &header, sizeof(lime_header))) < 0) {
-            fprintf(stderr, "Error saving LiME header\n");
-            return ret;
+        /* Write the LiMe header for that RAM region to the file (only if not RAW format)*/
+        if(!opts->raw) {
+            header.s_addr = ram_regions->regions[i].start;
+            header.e_addr = ram_regions->regions[i].end;
+            if ((ret = write_f(args, &header, sizeof(lime_header))) < 0) {
+                fprintf(stderr, "Error saving LiME header\n");
+                return ret;
+            }
         }
 
         /* Dump the memory range */

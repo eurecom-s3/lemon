@@ -24,6 +24,7 @@ struct options {
     /* Options */
     bool realtime;
     bool fatal;
+    bool raw;
 };
 
 struct mem_range {

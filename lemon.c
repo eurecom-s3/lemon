@@ -26,6 +26,7 @@ static const struct argp_option options[] = {
     {"udp",       'u', 0,           0, "Use UDP instead of TCP", 1},
     {"realtime",  'r', 0,           0, "Use realtime priority", 2},
     {"fatal",     'f', 0,           0, "Interrupt the dump in case of memory read error", 2},
+    {"raw",       'w', 0,           0, "Produce a RAW dump instead of a LiME one", 2},
     {0}
 };
 static const char doc[] = "Lemon - An eBPF Memory Dump Tool for x64 and ARM64 Linux and Android";
@@ -110,6 +111,9 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
             opts->udp = true;
             perror("To be implemented...");
             exit(EXIT_FAILURE);
+        case 'w':
+            opts->raw = true;
+            break;
         case ARGP_KEY_END:
             /* Validate mutual exclusivity of disk vs net dump */
             if (opts->network_mode && opts->disk_mode) {
