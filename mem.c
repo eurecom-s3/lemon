@@ -36,7 +36,7 @@ struct read_mem_result *read_mem_result;
     static uintptr_t v2p_offset;
 #elif __TARGET_ARCH_arm64
     static int64_t v2p_offset;
-    #ifdef(CORE)
+    #ifdef CORE
         static uintptr_t page_offset;
     #endif
 #endif
