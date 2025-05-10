@@ -1,9 +1,31 @@
 #include <sys/stat.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <sys/capability.h>
 
 #include "lemon.h"
 #include "ebpf/mem.ebpf.skel.h"
+
+/* Kernel definition of a memory region (from include/linux/ioport.h) 
+ * !!! WARNING !!! In theory this struct can change in different kernel versions
+ *                 However last time changes was in Linux 4.6
+ */
+struct resource {
+    unsigned long long start;
+    unsigned long long end;
+    const char *name;
+    unsigned long flags;
+    unsigned long desc;
+    struct resource *parent, *sibling, *child;
+};
+
+#define IORESOURCE_MEM		        0x00000200
+#define IORESOURCE_SYSRAM	        0x01000000
+#define IORESOURCE_BUSY		        0x80000000
+#define IORESOURCE_SYSTEM_RAM		(IORESOURCE_MEM|IORESOURCE_SYSRAM)
+#define SYSTEM_RAM_FLAGS            (IORESOURCE_SYSTEM_RAM | IORESOURCE_BUSY)
+
+extern int check_capability(const cap_value_t cap);
 
 /* File descriptor and mmap() pointer associated to the eBPF map.*/
 int read_mem_result_fd;
@@ -11,13 +33,16 @@ struct read_mem_result *read_mem_result;
 
 /* Offset used to perform physical to virtual address translation in x86 and ARM64 */
 #ifdef __TARGET_ARCH_x86
-    static uintptr_t page_offset_base;
+    static uintptr_t v2p_offset;
 #elif __TARGET_ARCH_arm64
-    static int64_t memstart_addr;
-    #ifndef CORE
+    static int64_t v2p_offset;
+    #ifdef CORE
         static uintptr_t page_offset;
     #endif
 #endif
+
+/*Address of root of struct resources list (physical memory regions list) */
+static uintptr_t iomem_resource;
 
 /*
  * init_mmap() - Initializes a shared memory mapping for reading memory results from eBPF
@@ -57,9 +82,9 @@ void cleanup_mmap() {
 
 uintptr_t phys_to_virt(const uintptr_t phy_addr) {
     #ifdef __TARGET_ARCH_x86
-        return phy_addr + page_offset_base;
+        return phy_addr + v2p_offset;
     #elif __TARGET_ARCH_arm64
-        uintptr_t vaddr = phy_addr - memstart_addr;
+        uintptr_t vaddr = phy_addr - v2p_offset;
         #ifndef CORE
             /* If in CO-RE mode the translation will be finished in the eBPF program */
             vaddr |= page_offset;
@@ -148,29 +173,63 @@ int __attribute__((noinline, optnone)) read_kernel_memory(const uintptr_t addr, 
     }
 #endif
 
+
 /*
- * init_phys_to_virt() - Initialize the physical-to-virtual address translation offset
+ * parse_kallsyms_line() - Extracts the address of a specific kernel symbol from a text line
+ * @line: A line of text, typically from /proc/kallsyms or System.map
+ * @symbol: The name of the symbol to search for
+ * @symbol_addr: Pointer to store the resolved symbol address
+ *
+ * Scans the line for the symbol name and extracts its address using sscanf.
+ * Returns 1 on success, 0 on not looked for element or a negative error code from read_kernel_memory().
+ */
+
+static int inline parse_kallsyms_line(const char *restrict line, const char *restrict symbol, uintptr_t *restrict current_symb_addr) {
+    char current_symb_name[256];
+
+    /* Read the address and check if the it is the symbol that we look for */
+    if ((sscanf(line, "%lx %*c %255s\n",current_symb_addr, current_symb_name) != 2) || strncmp(current_symb_name, symbol, strlen(symbol)))
+        return 0;
+
+    /* Check that address is not 0 */
+    return current_symb_addr != 0;
+}
+
+/*
+ * parse_kallsyms() - Parse /proc/kallsyms extracting needed symbols
  *
  * Opens /proc/kallsyms, searches for the appropriate symbol (e.g., "page_offset_base" or 
- * "memstart_addr") based on architecture, and retrieves the physical-to-virtual address 
- * translation offset. Returns 0 on success, or an error code on failure.
+ * "memstart_addr" and "iomem_resource") based on architecture, and retrieves the physical-to-virtual address 
+ * translation offset and the pointer to the tree of physical memory regions. Returns 0 on success, or an error code on failure.
  */
-static int init_phys_to_virt()
+static int parse_kallsyms()
 {
     FILE *fp;
     char line[256];
-    uintptr_t kallsyms_symb_addr = 0;
-    int err;
     __u8 *data = NULL;
+    uintptr_t current_symb_addr = 0;
+    int err;
+
+    /* Make sure we can use the same read for signed and unsigned offsets (arm/intel) */
+    _Static_assert(sizeof(uintptr_t) == sizeof(int64_t), "sizeof(uintptr_t) != sizeof(int64_t)");
+
+    /* Check for capabilities */
+    if((check_capability(CAP_SYSLOG) <= 0)) {
+        fprintf(stderr, "LEMON does not have CAP_SYSLOG to read addresses from /proc/kallsyms\n");
+        return EPERM;
+    }
 
     /* Symbol to be located in /proc/kallsyms */
+    iomem_resource = 0;
+    v2p_offset = 0;
+
     #ifdef __TARGET_ARCH_x86
-        char *symbol = "page_offset_base";
+        char *v2p_symbol = "page_offset_base";
     #elif __TARGET_ARCH_arm64
-        char *symbol = "memstart_addr";
+        char *v2p_symbol = "memstart_addr";
     #endif
 
-    /* Open the kallsyms file and look for the symbol in it*/
+    /* Open the kallsyms file and look for symbols in it*/
     fp = fopen("/proc/kallsyms", "r");
     if (!fp)
     {
@@ -178,55 +237,65 @@ static int init_phys_to_virt()
         return errno;
     }
 
-    /* Look for the symbol */
-    while (fgets(line, sizeof(line), fp))
-        if (strstr(line, symbol) && (sscanf(line, "%lx", &kallsyms_symb_addr) == 1)) break;
+    /* Look for all the symbols */
+    while (fgets(line, sizeof(line), fp)) {
+
+        /* Check if all the symbols are already found */
+        if(iomem_resource && v2p_offset) break;
+
+        /* Look for symbols */
+        if(!iomem_resource && parse_kallsyms_line(line, "iomem_resource", &current_symb_addr)) {
+            iomem_resource = current_symb_addr;
+            continue;
+        }
+
+        if(!v2p_offset && parse_kallsyms_line(line, v2p_symbol, &current_symb_addr)) {
+
+            /* Read it to obtain the offset */
+            if((err = read_kernel_memory(current_symb_addr, sizeof(uintptr_t), &data))) break;
+            #ifdef __TARGET_ARCH_x86
+                v2p_offset = *((uintptr_t *)data);
+            #elif __TARGET_ARCH_arm64
+                v2p_offset = *((int64_t *)data);
+            #endif
+            continue;
+        }
+    }
+
     if(fclose(fp)) {
         perror("Fail to close /proc/kallsyms");
         return errno;
     }
 
-    if (!kallsyms_symb_addr)
+    /* Check if all the virtual to phisical offset is found */
+    if (!v2p_offset)
     {
-        fprintf(stderr, "%s not found in /proc/kallsyms\n", symbol);
+        fprintf(stderr, "Symbol %s not found in /proc/kallsyms\n", v2p_symbol);
         return EIO;
     }
-
-    /* Make sure we can use the same read for signed and unsigned offsets (arm/intel) */
-    _Static_assert(sizeof(uintptr_t) == sizeof(int64_t), "sizeof(uintptr_t) != sizeof(int64_t)");
-    
-    /* Read the content of the kernel symbol to get the offset of direct mapping region */
-    if((err = read_kernel_memory(kallsyms_symb_addr, sizeof(uintptr_t), &data))) return err;
-    
-    // TODO Pass to _stext trick for x64
 
     /* We are able now to translate phys to virt addresses for X64. ARM64 instead is more complex 
      * and require two values, one of the two (CONFIG_ARM64_VA_BITS) available only in the eBPF 
      * CO-RE program or determined at runtime here for non CO-RE ones.
+     *
+     * TODO: false! it does not depends by CO-RE, but on availability of the kernel config (see libbpf)
      */
-    #ifdef __TARGET_ARCH_x86
-        page_offset_base = *((uintptr_t *)data);
-    
-    #elif __TARGET_ARCH_arm64
-        memstart_addr = *((int64_t *)data);
-        
-        #ifndef CORE
-            /* If the kernel is not CORE we determibne the CONFIG_ARM64_VA_BITS using the runtime value. */
-            unsigned long vabits = arm64_vabits_actual();
-            if (vabits == 0) {
-                perror("Failed to determine virtual address bits, defaulting to 48");
-                vabits = 48;
-            }
-            page_offset = -1L << vabits;
-        #endif
-    
+    #if defined(__TARGET_ARCH_arm64) && !defined(CORE)
+        /* If the kernel is not CORE we determine the CONFIG_ARM64_VA_BITS using the runtime value. */
+        unsigned long vabits = arm64_vabits_actual();
+        if (vabits == 0) {
+            fprintf(stderr, "Failed to determine virtual address bits, defaulting to 48\n");
+            vabits = 48;
+        }
+        page_offset = -1L << vabits;
+
     #endif
 
     return 0;
 }
 
 /*
- * get_iomem_regions() - Parse /proc/iomem to extract "System RAM" regions
+ * get_iomem_regions_user() - Parse /proc/iomem to extract "System RAM" regions
  * @ram_regions: Pointer to store the extracted RAM regions
  *
  * Opens /proc/iomem, searches for "System RAM" regions, and populates the provided
@@ -234,12 +303,19 @@ static int init_phys_to_virt()
  * reallocates memory as needed to accommodate additional regions. Returns 0 on success,
  * or an error code on failure.
  */
-static int get_iomem_regions(struct ram_regions *restrict ram_regions)
+static int get_iomem_regions_user(struct ram_regions *restrict ram_regions)
 {
     FILE *fp;
     char line[256];
     int slot_availables;
     uintptr_t start, end;
+    int cap_ret;
+
+    /* Check if we have CAP_SYS_ADMIN capability */
+    if((cap_ret = check_capability(CAP_SYS_ADMIN)) <= 0) {
+        fprintf(stderr, "LEMON does not have CAP_SYS_ADMIN to read /proc/iomem\n");
+        return cap_ret;
+    }
 
     /* Open the /proc/iomem and parse only "System RAM" regions */
     fp = fopen("/proc/iomem", "r");
@@ -260,7 +336,7 @@ static int get_iomem_regions(struct ram_regions *restrict ram_regions)
         fclose(fp);
         return errno;
     }
-    
+
     /* Look only for "System RAM" regions */
     while (fgets(line, sizeof(line), fp))
     {
@@ -280,7 +356,7 @@ static int get_iomem_regions(struct ram_regions *restrict ram_regions)
                 }
             }
 
-            /* Convert to virtual addresses */
+            /* Save region start and end */
             (ram_regions->regions)[ram_regions->num_regions].start = start;
             (ram_regions->regions)[ram_regions->num_regions].end = end;
             (ram_regions->num_regions)++;
@@ -296,17 +372,91 @@ static int get_iomem_regions(struct ram_regions *restrict ram_regions)
 }
 
 /*
+ * get_iomem_regions_kernel() - Parse struct resources directly in kernel to extract "System RAM" regions
+ * @ram_regions: Pointer to store the extracted RAM regions
+ *
+ * Read struct resources from kernel, and populates the provided
+ * ram_regions struct with the start and end addresses of each region. The function
+ * reallocates memory as needed to accommodate additional regions. Returns 0 on success,
+ * or an error code on failure.
+ */
+static int get_iomem_regions_kernel(struct ram_regions *restrict ram_regions)
+{
+    int slot_availables;
+    __u8 *data = NULL;
+    struct resource *res, *next_res;
+    int err;
+
+    /* Initial RAM regions allocations */
+    ram_regions->num_regions = 0;
+    slot_availables = 8;
+
+    ram_regions->regions = (struct mem_range *)malloc(slot_availables * sizeof(struct mem_range));
+    if (!ram_regions->regions)
+    {
+        perror("Failed to allocate memory for RAM ranges");
+        return errno;
+    }
+    
+    /* We follow the implementation of LiME considering only sibling leafs (level 1 only).
+     * Is it possible to have "System RAM" regions inside non System RAM regions? I don't think so. 
+     */
+
+    /* Obrain the address child of the root struct */
+    if((err = read_kernel_memory(iomem_resource, sizeof(struct resource), &data))) {
+        fprintf(stderr, "Error reading root struct resource");
+        return err;
+    }
+    res = ((struct resource *)data);
+    next_res = res->child;
+
+    /* Walk the sibling list */
+    while(next_res) {
+        if((err = read_kernel_memory((uintptr_t)next_res, sizeof(struct resource), &data))) {
+            fprintf(stderr, "Error reading sibling struct");
+            return err;
+        }
+        res = ((struct resource *)data);
+
+        /* Check if it is a "System RAM" region using flags instead of string (reduce memory copying from kernel to user) */
+        if(res->name && ((res->flags & SYSTEM_RAM_FLAGS) == SYSTEM_RAM_FLAGS)) {
+            /* If the array is full, reallocate to increase its size */
+            if (ram_regions->num_regions >= slot_availables)
+            {
+                slot_availables *= 2;
+                ram_regions->regions = 
+                    (struct mem_range *)realloc(ram_regions->regions, slot_availables * sizeof(struct mem_range));
+                if (!ram_regions->regions)
+                {
+                    perror("Failed to reallocate memory for RAM ranges");
+                    return errno;
+                }
+            }
+
+            /* Save region start and end */
+            (ram_regions->regions)[ram_regions->num_regions].start = res->start;
+            (ram_regions->regions)[ram_regions->num_regions].end = res->end;
+            (ram_regions->num_regions)++;
+        }
+
+        /* Prepare for next iteration */
+        next_res = res->sibling;
+    }
+    return 0;
+}
+
+/*
  * toggle_kptr() - Toggle the kernel.kptr_restrict sysctl setting
  *
- * Reads and toggles /proc/sys/kernel/kptr_restrict between 0 and its original value.
+ * Reads and toggles /proc/sys/kernel/kptr_restrict between 0 and its original value (only if needed).
  * Caches the original value on first call. Returns 0 on success, or an error code on failure.
  */
-static int toggle_kptr(void) {
+ int toggle_kptr(void) {
     static int orig_kptr_status = - 1;
 
     struct stat stat_tmp;
     FILE *kptr_fd;
-    int current_kptr_status, new_kptr_status, err = 0;
+    int current_kptr_status, new_kptr_status, cap_ret, err = 0;
 
     /* If kptr_restrict does not exists (?) do nothing */
     if(stat("/proc/sys/kernel/kptr_restrict", &stat_tmp)) {
@@ -315,7 +465,7 @@ static int toggle_kptr(void) {
     }
 
     /* Open the file */
-    if(!(kptr_fd = fopen("/proc/sys/kernel/kptr_restrict", "r+"))) {
+    if(!(kptr_fd = fopen("/proc/sys/kernel/kptr_restrict", "r"))) {
         perror("Failed to open /proc/sys/kernel/kptr_restrict");
         return errno;
     }
@@ -326,11 +476,30 @@ static int toggle_kptr(void) {
         err = errno;
         goto cleanup;
     }
-    rewind(kptr_fd);
 
     /* Save the original value */
     if(orig_kptr_status == -1) {
         orig_kptr_status = current_kptr_status;
+    }
+
+    /* If the original kptr_value is 0 do nothing */
+    if(!orig_kptr_status) goto cleanup;
+
+    /* If the value is 1 and we have CAP_SYSLOG is not necessary to toggle it (neigter CAP_SYS_ADMIN!) :) */
+    if((orig_kptr_status == 1) && (check_capability(CAP_SYSLOG) > 0)) goto cleanup;
+
+    /* Check CAP_SYS_ADMIN to modify kptr_restrict */
+    if((cap_ret = check_capability(CAP_SYS_ADMIN)) <= 0) {
+        fprintf(stderr, "LEMON does not have CAP_SYS_ADMIN to modify /proc/sys/kernel/kptr_restrict policy\n");
+        err = cap_ret;
+        goto cleanup;
+    }
+
+    /* Reopen the file in RW mode */
+    if(!(kptr_fd = freopen(NULL, "r+", kptr_fd))) {
+        perror("Failed to open /proc/sys/kernel/kptr_restrict in RW mode");
+        err = errno;
+        goto cleanup;
     }
 
     /* Toggle the kptr_restrict value*/
@@ -352,25 +521,27 @@ static int toggle_kptr(void) {
 }
 
 /*
- * get_memory_regions() - Initialize phys-to-virt translation and extract System RAM regions
+ * init_translation() - Initialize phys-to-virt translation and extract System RAM regions
  * @ram_regions: Output pointer for storing valid memory regions
  * @skel: eBPF skeleton used for memory access
  *
- * Temporarily disables kptr restriction, initializes the physical-to-virtual address mapping,
- * restores the restriction, and retrieves System RAM virtual address ranges from /proc/iomem.
+ * Initializes the physical-to-virtual address mapping and retrieves System RAM virtual address ranges 
+ * from kernel or /proc/iomem.
  * Returns 0 on success or an error code on failure.
  */
-int get_memory_regions(struct ram_regions *restrict ram_regions, struct mem_ebpf *restrict skel) {
+int init_translation(struct ram_regions *restrict ram_regions, struct mem_ebpf *restrict skel) {
     int err;
 
-    /* Disable KPTR censorship */
-    if((err = toggle_kptr())) return err;
+    /* Parse kallsyms looking for symbols needed to initialize translatation system */
+    if((err = parse_kallsyms())) return err;
 
-    /* Determine the offset for translations */
-    if((err = init_phys_to_virt())) return err;
+    /* If the iomem_resource symbol is available access to it through eBPF bypassing CAP_SYS_ADMIN
+     * Otherwise use /proc/iomem which requires CAP_SYS_ADMIN.
+     */
 
-    /* Restore original KPTR censhorship level*/
-    if((err = toggle_kptr())) return err;
-
-    return get_iomem_regions(ram_regions);
+    if(iomem_resource) {
+        return get_iomem_regions_kernel(ram_regions);
+    }
+    else
+        return get_iomem_regions_user(ram_regions);
 }

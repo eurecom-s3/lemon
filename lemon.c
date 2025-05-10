@@ -4,11 +4,12 @@
 #include <bpf/bpf.h>
 #include <bpf/btf.h>
 #include <sys/utsname.h>
+#include <sys/capability.h>
 
 #include "lemon.h"
 #include "ebpf/mem.ebpf.skel.h"
 
-extern int get_memory_regions(struct ram_regions *restrict ram_regions, struct mem_ebpf *restrict skel);
+extern int init_translation(struct ram_regions *restrict ram_regions, struct mem_ebpf *restrict skel);
 extern int dump_on_disk(const struct options *restrict opts, const struct ram_regions *restrict ram_regions);
 extern int dump_on_net(const struct options *restrict opts, const struct ram_regions *restrict ram_regions);
 extern int increase_priority(void);
@@ -16,9 +17,10 @@ extern int init_mmap(struct mem_ebpf *restrict skel);
 extern void cleanup_mmap(void);
 extern int launch_cpu_stealers(void);
 extern int join_cpu_stealers(void);
+extern int check_capability(const cap_value_t cap);
+extern int toggle_kptr(void);
 
 /* Constants needed for argparse */
-// TODO refine me
 static const struct argp_option options[] = {
     {"disk",      'd', "PATH",      0, "Dump on disk", 0},
     {"network",   'n', "ADDRESS",   0, "Dump through the network", 1},
@@ -40,6 +42,12 @@ static const char doc[] = "Lemon - An eBPF Memory Dump Tool for x64 and ARM64 Li
  */
 static int load_ebpf_mem_progs(struct mem_ebpf **restrict skel) {
     int ret;
+
+    /* Check if we have sufficient capabilities to set RLIMIT_MEMLOCK (required by libbpf...)*/
+    if((check_capability(CAP_PERFMON) <= 0) && (check_capability(CAP_SYS_ADMIN) <= 0)) {
+        fprintf(stderr, "LEMON does not have CAP_PERFMON needed to modify RLIMIT_MEMLOCK\n");
+        return EPERM;
+    }
 
     /* Open the BPF object file */
     *skel = mem_ebpf__open();
@@ -109,7 +117,7 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
             break;
         case 'u':
             opts->udp = true;
-            perror("To be implemented...");
+            fprintf(stderr, "To be implemented...\n");
             exit(EXIT_FAILURE);
         case 'w':
             opts->raw = true;
@@ -176,10 +184,16 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
 
+    /* Check if can load eBPF programs */
+    if((check_capability(CAP_BPF) <= 0) && (check_capability(CAP_SYS_ADMIN) <= 0)) {
+        fprintf(stderr, "LEMON does not have CAP_BPF to load the eBPF component\n");
+        return EXIT_FAILURE;
+    }
+
     /* Check for eBPF support */
     bpf_prog_load(BPF_PROG_TYPE_UNSPEC, NULL, NULL, NULL, 0, NULL);
 	if(errno == ENOSYS) {
-        perror("eBPF not supported by this kernel :(");
+        fprintf(stderr, "eBPF not supported by this kernel");
         return EXIT_FAILURE;
     }
 
@@ -187,7 +201,7 @@ int main(int argc, char **argv)
         /* Check for eBPF CORE support */
         struct btf *vmlinux_btf = btf__load_vmlinux_btf();
         if (!vmlinux_btf) {
-            perror("eBPF CO-RE not supported by this kernel :(");
+            fprintf(stderr, "eBPF CO-RE not supported by this kernel. Try to use no CO-RE version.");
             return EXIT_FAILURE;
         }
         btf__free(vmlinux_btf);
@@ -209,8 +223,11 @@ int main(int argc, char **argv)
     /* Load eBPF progs that read memory */
     if((ret = load_ebpf_mem_progs(&skel))) return ret;
 
+    /* Disable kptr_restrict if needed */
+    if((ret = toggle_kptr())) return ret;
+
     /* Determine the memory dumpable regions */
-    if((ret = get_memory_regions(&ram_regions, skel))) goto cleanup;
+    if((ret = init_translation(&ram_regions, skel))) goto cleanup;
 
     /* Dump on a file */
     if(opts.disk_mode) {
@@ -229,6 +246,9 @@ int main(int argc, char **argv)
             mem_ebpf__destroy(skel);
         }
         join_cpu_stealers();
+
+        /* Restore kptr_restrict if needed */
+        if((ret = toggle_kptr())) return ret;
 
     return EXIT_SUCCESS;
 }
