@@ -33,7 +33,7 @@ Precompiled static binaries are available in this repository (check the Github a
 To build LEMON, install the necessary dependencies on the analyst's machine. The following command sets up all required packages on an Ubuntu 24.04 system:
 
 ```sh
-sudo apt install -y git make clang llvm libbpf-dev linux-tools-generic
+sudo apt install -y git make clang llvm libbpf-dev libcap-dev linux-tools-generic
 ```
 
 Other distributions provide equivalent packages, which at minimum allow compiling the dynamic version via the system package manager.

@@ -17,7 +17,7 @@ jobs:
     - name: Install dependencies from apt
       run: |
         sudo apt update
-        sudo apt install -y make clang llvm libbpf-dev linux-tools-generic
+        sudo apt install -y make clang llvm libbpf-dev libcap-dev linux-tools-generic
     
     - name: Compile with Make
       run: |

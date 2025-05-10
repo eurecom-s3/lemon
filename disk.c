@@ -2,10 +2,12 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <sys/stat.h>
+#include <sys/capability.h>
 
 #include "lemon.h"
 
 extern int dump(const struct options *restrict opts, const struct ram_regions *restrict ram_regions, int (*write_f)(void *restrict, const void *restrict, const unsigned long), void *restrict args);
+extern int check_capability(const cap_value_t cap);
 
 /*
  * write_on_disk() - Writes a memory chunks to the disk file descriptor
@@ -43,6 +45,11 @@ int dump_on_disk(const struct options *restrict opts, const struct ram_regions *
     
     int fd;
     int ret = 0;
+
+    /* Check CAP_DAC_OVERRIDE, creation of the file can fail without it */
+    if(check_capability(CAP_DAC_OVERRIDE) <= 0) {
+        fprintf(stderr, "LEMON does not have CAP_DAC_OVERRIDE, it may fail in dump file creation\n");
+    }
 
     /* Open dump file in write mode */
     fd = open(opts->path, O_CREAT | O_WRONLY, S_IRUSR | S_IWUSR);

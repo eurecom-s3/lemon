@@ -38,7 +38,7 @@ static int dump_region(const uintptr_t region_start, const uintptr_t region_end,
 
 
         if ((ret = read_kernel_memory(phys_to_virt(chunk_start), chunk_size, &read_data))) {
-            fprintf(stderr, "Error reading kernel physical memory. Physical address: 0x%lx, size: 0x%zx. Error code: %d\n", chunk_start, chunk_size, ret);
+            fprintf(stderr, "Error reading kernel physical memory. Physical address: 0x%lx, size: 0x%zx. Error code: %d Maybe KFENCE area ?\n", chunk_start, chunk_size, ret);
             
             /* Error reading memory, abort the dump or try with minimum granule of the system */
             if(fatal) return ret;

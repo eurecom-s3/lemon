@@ -18,7 +18,7 @@ endif
 # Define compiler and flags
 CLANG   := clang
 CFLAGS  := -Wall -O2 -D$(TARGET_ARCH)
-LDFLAGS := -lbpf -lelf -lz -lzstd
+LDFLAGS := -lbpf -lelf -lz -lzstd -lcap
 
 # Conditional flags
 ifeq ($(CORE), 1)
@@ -31,14 +31,14 @@ ifeq ($(STATIC), 1)
 endif
 
 # Files
-LOADER_SRCS := lemon.c cpu_stealer.c mem.c dump.c disk.c net.c
+LOADER_SRCS := lemon.c cpu_stealer.c mem.c dump.c disk.c net.c capabilities.c
 LOADER_BIN  := lemon.$(ARCH)
 BPF_SRC     := ebpf/mem.ebpf.c
 BPF_OBJ     := ebpf/mem.ebpf.o
 BPF_SKEL    := ebpf/mem.ebpf.skel.h
 
 # Default target: If CORE is enabled, make vmlinux first, then compile eBPF and loader
-all: $(if $(filter 1,$(CORE)), vmlinux) $(BPF_OBJ) $(LOADER_BIN)
+all: clean $(if $(filter 1,$(CORE)), vmlinux) $(BPF_OBJ) $(LOADER_BIN)
 
 # Build eBPF object and generate skeleton
 $(BPF_OBJ): $(BPF_SRC)
