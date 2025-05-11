@@ -8,6 +8,8 @@
 #define DEFAULT_PORT            2304                    /* Default port used for networt dump */
 #define UDP_MAX_PAYLOAD         1024                    /* Maximum payload for UDP socket */
 
+#define WARN(msg, ...) fprintf(stderr, "WARNING: " msg "\n", ##__VA_ARGS__)
+
 struct options {
     /* Modes */
     bool disk_mode;

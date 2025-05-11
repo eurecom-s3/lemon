@@ -56,7 +56,7 @@ static void* thread_function(void* arg) {
         ret = pthread_mutex_trylock(&mut);
     }
     
-    /* Unlock in case of error */
+    /* Unlock the mutex if it was succesfully acquired */
     if (!ret) {
         pthread_mutex_unlock(&mut);
     }

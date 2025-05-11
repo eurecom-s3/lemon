@@ -77,27 +77,27 @@ static int dump_region(const uintptr_t region_start, const uintptr_t region_end,
  * in chunks using eBPF, and writes the contents to the specified output.
  * On read failures, either aborts or fills the chunk with 0xFF, based on fatal mode.
  */
-
 int dump(const struct options *restrict opts, const struct ram_regions *restrict ram_regions, int (*write_f)(void *restrict, const void *restrict, const unsigned long), void *restrict args) {
-    lime_header header;
-    uintptr_t region_start, region_end;
     int ret = 0;
-
-    /* Prepare the LiME header */
-    memset(&header, '\x00', sizeof(header));
-    header.magic = 0x4C694D45;
-    header.version = 1;
 
     /* Loop through the system RAM ranges, read the memory ranges and write them on file */
     for (size_t i = 0; i < ram_regions->num_regions; i++)
     {
-        region_start = ram_regions->regions[i].start;
-        region_end = ram_regions->regions[i].end;
+        const uintptr_t region_pstart = ram_regions->regions[i].start;
+        const uintptr_t region_pend = ram_regions->regions[i].end;
+
+        printf("Dumping Range: 0x%lx-0x%lx\n", region_pstart, region_pend);
 
         /* Write the LiMe header for that RAM region to the file (only if not RAW format)*/
         if(!opts->raw) {
-            header.s_addr = ram_regions->regions[i].start;
-            header.e_addr = ram_regions->regions[i].end;
+            const lime_header header = {
+                .magic = 0x4C694D45,
+                .version = 1,
+                .s_addr = region_pstart,
+                .e_addr = region_pend,
+                .reserved = {0},
+            };
+
             if ((ret = write_f(args, &header, sizeof(lime_header))) < 0) {
                 fprintf(stderr, "Error saving LiME header\n");
                 return ret;
@@ -105,8 +105,7 @@ int dump(const struct options *restrict opts, const struct ram_regions *restrict
         }
 
         /* Dump the memory range */
-        printf("Dumping Range: 0x%lx-0x%lx\n", region_start, region_end);
-        if((ret = dump_region(region_start, region_end, HUGE_PAGE_SIZE, write_f, args, opts->fatal))) return ret;
+        if((ret = dump_region(region_pstart, region_pend, HUGE_PAGE_SIZE, write_f, args, opts->fatal))) return ret;
     }
 
     return ret;
