@@ -45,8 +45,7 @@ static int load_ebpf_mem_progs(struct mem_ebpf **restrict skel) {
 
     /* Check if we have sufficient capabilities to set RLIMIT_MEMLOCK (required by libbpf...)*/
     if((check_capability(CAP_PERFMON) <= 0) && (check_capability(CAP_SYS_ADMIN) <= 0)) {
-        fprintf(stderr, "LEMON does not have CAP_PERFMON needed to modify RLIMIT_MEMLOCK\n");
-        return EPERM;
+        WARN("LEMON does not have CAP_PERFMON needed to modify RLIMIT_MEMLOCK");
     }
 
     /* Open the BPF object file */
@@ -173,21 +172,17 @@ int main(int argc, char **argv)
 
     /* Check if is running as root */
     if(getuid() != 0) {
-        fprintf(stderr, "Must be run as root\n");
-        return EXIT_FAILURE;
+        WARN("LEMON is not running as root.");
     }
 
     /* Check Linux version */
-    if((ret = check_kernel_version()) < 0) return EXIT_FAILURE;
-    if(!ret) {
-        fprintf(stderr, "Linux version is too old. Minimum required version: %d.%d\n", MIN_MAJOR_LINUX, MIN_MINOR_LINUX);
-        return EXIT_FAILURE;
+    if(check_kernel_version() != 1) {
+        WARN("Detected Linux version is not supported by LEMON. Minimum required version: %d.%d", MIN_MAJOR_LINUX, MIN_MINOR_LINUX);
     }
 
     /* Check if can load eBPF programs */
     if((check_capability(CAP_BPF) <= 0) && (check_capability(CAP_SYS_ADMIN) <= 0)) {
-        fprintf(stderr, "LEMON does not have CAP_BPF to load the eBPF component\n");
-        return EXIT_FAILURE;
+        WARN("LEMON does not have CAP_BPF nor CAP_SYS_ADMIN to load the eBPF component");
     }
 
     /* Check for eBPF support */
@@ -214,10 +209,14 @@ int main(int argc, char **argv)
     /* Increase process priority and lauch stealers */
     if(opts.realtime) {
         ret = increase_priority();
-        if (ret) return ret;
+        if (ret) {
+            WARN("Failed to increase process priority");
+        }
 
         ret = launch_cpu_stealers();
-        if(ret) return ret;
+        if(ret) {
+            WARN("Failed to launch CPU stealers");
+        }
     }
 
     /* Load eBPF progs that read memory */

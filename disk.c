@@ -48,7 +48,7 @@ int dump_on_disk(const struct options *restrict opts, const struct ram_regions *
 
     /* Check CAP_DAC_OVERRIDE, creation of the file can fail without it */
     if(check_capability(CAP_DAC_OVERRIDE) <= 0) {
-        fprintf(stderr, "LEMON does not have CAP_DAC_OVERRIDE, it may fail in dump file creation\n");
+        WARN("LEMON does not have CAP_DAC_OVERRIDE, it may fail in dump file creation\n");
     }
 
     /* Open dump file in write mode */
