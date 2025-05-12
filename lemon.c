@@ -12,10 +12,9 @@
 extern int init_translation(struct ram_regions *restrict ram_regions, struct mem_ebpf *restrict skel);
 extern int dump_on_disk(const struct options *restrict opts, const struct ram_regions *restrict ram_regions);
 extern int dump_on_net(const struct options *restrict opts, const struct ram_regions *restrict ram_regions);
-extern int increase_priority(void);
+extern int increase_priority_and_launch_stealers(void);
 extern int init_mmap(struct mem_ebpf *restrict skel);
 extern void cleanup_mmap(void);
-extern int launch_cpu_stealers(void);
 extern int join_cpu_stealers(void);
 extern int check_capability(const cap_value_t cap);
 extern int toggle_kptr(void);
@@ -208,14 +207,9 @@ int main(int argc, char **argv)
 
     /* Increase process priority and lauch stealers */
     if(opts.realtime) {
-        ret = increase_priority();
-        if (ret) {
-            WARN("Failed to increase process priority");
-        }
-
-        ret = launch_cpu_stealers();
+        ret = increase_priority_and_launch_stealers();
         if(ret) {
-            WARN("Failed to launch CPU stealers");
+            WARN("Failed to increase process priority and launch CPU stealers");
         }
     }
 
