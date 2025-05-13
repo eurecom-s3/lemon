@@ -11,6 +11,8 @@
 #include <unistd.h>
 #include <sched.h>
 
+#include "lemon.h"
+
 static int nprocs = 0;
 static pthread_t *threads = NULL;
 static pthread_mutex_t mut = PTHREAD_MUTEX_INITIALIZER;
@@ -84,23 +86,23 @@ static void* thread_function(void *arg) {
  * @param n: Number of threads to join.
  */
 static int join_n_cpu_stealers(int n) {
-    int ret = 0;
-    if(!threads) return 0;
+    if(!threads) return -1;
 
     /* Unlock the global mutex */
-    if((ret = pthread_mutex_unlock(&mut))) {
-        fprintf(stderr, "Fail to unlock mutex\n");
+    if(pthread_mutex_unlock(&mut)) {
+        WARN("Fail to unlock mutex\n");
+        return -1;
     }
 
     /* Join all the processes */
-    for (int i = 0; i < n - 1; i++) {
-        ret = pthread_join(threads[i], NULL);
-        if (ret) continue;
+    for (int i = 0; i < n; i++) {
+        const int ret = pthread_join(threads[i], NULL);
+        if (ret) return -1;
     }
 
     free(threads);
     threads = NULL;
-    return ret;
+    return 0;
 }
 
 /*
@@ -121,7 +123,7 @@ static int launch_cpu_stealers(const int priority) {
     nprocs = get_nprocs();
     threads = (pthread_t *)malloc((nprocs) * sizeof(pthread_t));
     if(!threads) {
-        perror("Fail to allocate pthread_t structs");
+        perror("Failed to allocate pthread_t structs");
         return errno;
     }
 
@@ -179,7 +181,7 @@ int increase_priority_and_launch_stealers() {
 /*
  * @brief Join all CPU stealer threads.
  *
- * Wrapper around join_n_cpu_stealers() using the global nprocs value.
+ * Wrapper around join_n_cpu_stealers() that unlocks all of them.
  */
 int join_cpu_stealers() {
     return join_n_cpu_stealers(nprocs);

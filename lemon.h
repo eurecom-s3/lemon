@@ -1,3 +1,6 @@
+#ifndef LEMON_H
+#define LEMON_H
+
 #include <stdbool.h>
 #include <errno.h>
 
@@ -51,3 +54,5 @@ struct read_mem_result {
     int ret_code;
     unsigned char buf[HUGE_PAGE_SIZE];
 };
+
+#endif /* LEMON_H */
