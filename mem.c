@@ -110,17 +110,19 @@ int __attribute__((noinline, optnone)) read_kernel_memory(const uintptr_t addr, 
     return read_mem_result->ret_code;
 }
 
-#if defined(__TARGET_ARCH_arm64) && !defined(CORE)
+#if defined(__TARGET_ARCH_arm64)
    /*
-    * is_mmap_respecting_address() - Check if memory mapping respects the given address
-    * @addr: The address to check
+    * @brief Check if memory mapping respects the given address
+    * @param addr: The address to check
     *
     * Attempts to mmap a 1-byte region at the specified address. If the mmap operation is successful 
-    * and the address is valid (greater than or equal to the specified address), the function returns 
+    * and the address is valid (greater than or equal to the specified address) the function returns 
     * true. Otherwise, it returns false.
+    * 
+    * @return: true if the mmap succeeds at addr, false otherwise.
     */
     static bool is_mmap_respecting_address(void *addr) {
-        unsigned int size = getpagesize();
+        const size_t size = 1;
         void *mapped_addr = mmap(addr, size, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 
         if (mapped_addr == MAP_FAILED) {
@@ -128,6 +130,7 @@ int __attribute__((noinline, optnone)) read_kernel_memory(const uintptr_t addr, 
         }
         
         if (munmap(mapped_addr, size) == -1) {
+            perror("Failed to munmap");
             return false;
         }
 
