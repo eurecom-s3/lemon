@@ -27,6 +27,9 @@ struct resource {
 
 extern int check_capability(const cap_value_t cap);
 
+/* eBPF memory read program skeleton */
+struct mem_ebpf *mem_ebpf_skel;
+
 /* File descriptor and mmap() pointer associated to the eBPF map.*/
 int read_mem_result_fd;
 struct read_mem_result *read_mem_result;
@@ -46,14 +49,13 @@ static uintptr_t iomem_resource;
 
 /*
  * init_mmap() - Initializes a shared memory mapping for reading memory results from eBPF
- * @skel: eBPF skeleton containing the map to be used
  *
  * Retrieves the file descriptor for the BPF map and creates a shared memory mapping
  * to allow user space to access the memory read results.
  */
-int init_mmap(struct mem_ebpf *restrict skel) {
+static int init_mmap() {
     
-    read_mem_result_fd = bpf_map__fd(skel->maps.read_mem_array_map);
+    read_mem_result_fd = bpf_map__fd(mem_ebpf_skel->maps.read_mem_array_map);
     if(read_mem_result_fd < 0)
         return read_mem_result_fd;
 
@@ -66,10 +68,54 @@ int init_mmap(struct mem_ebpf *restrict skel) {
 }
 
 /*
- * cleanup_mmap() - Unmaps the shared memory region used for memory memory.
+ * load_ebpf_mem_progs() - Initialize and attach eBPF programs for memory access
+ *
+ * Opens, loads, attaches the eBPF programs, and sets up shared memory. 
+ * Returns 0 on success or a negative error code on failure.
+ */
+int load_ebpf_mem_progs() {
+    int ret;
+
+    /* Check if we have sufficient capabilities to set RLIMIT_MEMLOCK (required by libbpf...)*/
+    if((check_capability(CAP_PERFMON) <= 0) && (check_capability(CAP_SYS_ADMIN) <= 0)) {
+        WARN("LEMON does not have CAP_PERFMON needed to modify RLIMIT_MEMLOCK");
+    }
+
+    /* Open the BPF object file */
+    mem_ebpf_skel = mem_ebpf__open();
+    if(!mem_ebpf_skel) {
+        perror("Failed to open BPF skeleton");
+        return errno;
+    }
+
+    /* Load the BPF objectes */
+    if (mem_ebpf__load(mem_ebpf_skel)) {
+        perror("Failed to load BPF object");
+        return errno;
+    }
+
+    /* Attach the uprobe to the 'read_kernel_memory' function in the current executable */
+    if (mem_ebpf__attach(mem_ebpf_skel)) {
+        fprintf(stderr, "Failed to attach program\n");
+        return errno;
+    }
+
+    /* Create the mmap */
+    if((ret = init_mmap())) {
+        return ret;
+    }
+
+    return 0;
+}
+
+/*
+ * cleanup_mem_ebpf() - Unmaps the shared memory region used to access map and free eBPF resources.
  */
 void cleanup_mmap() {
-    if(read_mem_result) munmap(read_mem_result, sizeof(struct read_mem_result));
+    if(mem_ebpf_skel) {
+        if(read_mem_result) munmap(read_mem_result, sizeof(struct read_mem_result));
+        mem_ebpf__destroy(mem_ebpf_skel);
+    }
 }
 
 /*
@@ -523,13 +569,12 @@ static int get_iomem_regions_kernel(struct ram_regions *restrict ram_regions)
 /*
  * init_translation() - Initialize phys-to-virt translation and extract System RAM regions
  * @ram_regions: Output pointer for storing valid memory regions
- * @skel: eBPF skeleton used for memory access
  *
  * Initializes the physical-to-virtual address mapping and retrieves System RAM virtual address ranges 
  * from kernel or /proc/iomem.
  * Returns 0 on success or an error code on failure.
  */
-int init_translation(struct ram_regions *restrict ram_regions, struct mem_ebpf *restrict skel) {
+int init_translation(struct ram_regions *restrict ram_regions) {
     int err;
 
     /* Parse kallsyms looking for symbols needed to initialize translatation system */

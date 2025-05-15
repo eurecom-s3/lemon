@@ -1,3 +1,4 @@
+#include <stdlib.h>
 #include <unistd.h>
 #include <argp.h>
 #include <arpa/inet.h>
@@ -7,14 +8,12 @@
 #include <sys/capability.h>
 
 #include "lemon.h"
-#include "ebpf/mem.ebpf.skel.h"
 
-extern int init_translation(struct ram_regions *restrict ram_regions, struct mem_ebpf *restrict skel);
+extern int load_ebpf_mem_progs(void);
+extern int init_translation(struct ram_regions *restrict ram_regions);
 extern int dump_on_disk(const struct options *restrict opts, const struct ram_regions *restrict ram_regions);
 extern int dump_on_net(const struct options *restrict opts, const struct ram_regions *restrict ram_regions);
 extern int increase_priority_and_launch_stealers(void);
-extern int init_mmap(struct mem_ebpf *restrict skel);
-extern void cleanup_mmap(void);
 extern int join_cpu_stealers(void);
 extern int check_capability(const cap_value_t cap);
 extern int toggle_kptr(void);
@@ -31,48 +30,6 @@ static const struct argp_option options[] = {
     {0}
 };
 static const char doc[] = "Lemon - An eBPF Memory Dump Tool for x64 and ARM64 Linux and Android";
-
-/*
- * load_ebpf_mem_progs() - Initialize and attach eBPF programs for memory access
- * @skel: Output pointer to the initialized mem_ebpf skeleton
- *
- * Opens, loads, attaches the eBPF programs, and sets up shared memory. 
- * Returns 0 on success or a negative error code on failure.
- */
-static int load_ebpf_mem_progs(struct mem_ebpf **restrict skel) {
-    int ret;
-
-    /* Check if we have sufficient capabilities to set RLIMIT_MEMLOCK (required by libbpf...)*/
-    if((check_capability(CAP_PERFMON) <= 0) && (check_capability(CAP_SYS_ADMIN) <= 0)) {
-        WARN("LEMON does not have CAP_PERFMON needed to modify RLIMIT_MEMLOCK");
-    }
-
-    /* Open the BPF object file */
-    *skel = mem_ebpf__open();
-    if(!skel) {
-        perror("Failed to open BPF skeleton");
-        return errno;
-    }
-
-    /* Load the BPF objectes */
-    if (mem_ebpf__load(*skel)) {
-        perror("Failed to load BPF object");
-        return errno;
-    }
-
-    /* Attach the uprobe to the 'read_kernel_memory' function in the current executable */
-    if (mem_ebpf__attach(*skel)) {
-        fprintf(stderr, "Failed to attach program\n");
-        return errno;
-    }
-
-    /* Create the mmap */
-    if((ret = init_mmap(*skel))) {
-        return ret;
-    }
-
-    return 0;
-}
 
 /*
  * parse_opt() - Argument parser callback for argp
@@ -163,7 +120,6 @@ static int check_kernel_version() {
 
 int main(int argc, char **argv)
 {
-    struct mem_ebpf *skel = NULL;
     struct ram_regions ram_regions;
     struct options opts = {0};
     struct argp argp = {options, parse_opt, "", doc};
@@ -214,13 +170,13 @@ int main(int argc, char **argv)
     }
 
     /* Load eBPF progs that read memory */
-    if((ret = load_ebpf_mem_progs(&skel))) return ret;
+    if((ret = load_ebpf_mem_progs())) return ret;
 
     /* Disable kptr_restrict if needed */
     if((ret = toggle_kptr())) return ret;
 
     /* Determine the memory dumpable regions */
-    if((ret = init_translation(&ram_regions, skel))) goto cleanup;
+    if((ret = init_translation(&ram_regions))) goto cleanup;
 
     /* Dump on a file */
     if(opts.disk_mode) {
@@ -234,10 +190,6 @@ int main(int argc, char **argv)
 
     /* Cleanup: close BPF object */
     cleanup:
-        if(skel) {
-            cleanup_mmap();
-            mem_ebpf__destroy(skel);
-        }
         join_cpu_stealers();
 
         /* Restore kptr_restrict if needed */
