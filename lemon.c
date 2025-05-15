@@ -17,6 +17,7 @@ extern int increase_priority_and_launch_stealers(void);
 extern int join_cpu_stealers(void);
 extern int check_capability(const cap_value_t cap);
 extern int toggle_kptr(void);
+extern void cleanup_mem_ebpf(void);
 
 /* Constants needed for argparse */
 static const struct argp_option options[] = {
@@ -190,6 +191,7 @@ int main(int argc, char **argv)
 
     /* Cleanup: close BPF object */
     cleanup:
+        cleanup_mem_ebpf();
         join_cpu_stealers();
 
         /* Restore kptr_restrict if needed */

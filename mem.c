@@ -111,7 +111,7 @@ int load_ebpf_mem_progs() {
 /*
  * cleanup_mem_ebpf() - Unmaps the shared memory region used to access map and free eBPF resources.
  */
-void cleanup_mmap() {
+void cleanup_mem_ebpf() {
     if(mem_ebpf_skel) {
         if(read_mem_result) munmap(read_mem_result, sizeof(struct read_mem_result));
         mem_ebpf__destroy(mem_ebpf_skel);
