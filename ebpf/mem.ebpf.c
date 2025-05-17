@@ -31,7 +31,8 @@ struct {
     #endif
 #endif
 
-/* VA bits for ARM64 
+/*
+ * read_memory() - Read kernel memory and save the content in the eBPF map
  *
  * Attempts to read a specified chunk of kernel memory starting from a given address,
  * validating the request against architecture-specific constraints and dump size limits.

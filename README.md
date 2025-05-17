@@ -76,8 +76,8 @@ Other distributions provide equivalent packages, which at minimum allow compilin
 - [X] Insert checks on kernel versions and ```CONFIG_``` kernel options to extend support
 - [X] Implement network dump (TCP)
 - [X] Implement dump with reduced granule if page fail to be read
+- [X] Introduce support for kernels that do not have uprobes
 - [ ] Support other CPU architectures (x32, ARM32, MIPS, PowerPC, POWER, RISC-V)
-- [ ] Introduce support for kernels that do not have uprobes (by hooking some syscall or intectept egress traffic in read only from TC?)
 - [ ] Use of `_stext` in x64 to bypass missing `CONFIG_KALLSYMS_ALL`
 - [ ] Bruteforce scanning (?) for page containing same data of  `_stext` page in ARM64 to bypass missing `CONFIG_KALLSYMS_ALL`
 - [ ] Implement network dump (UDP)
@@ -90,11 +90,11 @@ Other distributions provide equivalent packages, which at minimum allow compilin
 - Introduction of kProbe/uProbe support 4.1
 - Introduction of tracepoint support (syscalls tracing) 4.7
 - Introduction of XDP 4.8
-- !!! Android 9 support eBPF: 4.9
+- Android 9 support eBPF: 4.9
 - Introduction of BTF 4.18
 - Introduction mmap() support for array maps 5.5
 - !!! Introduction of read_kernel() 5.5 <==== Minimum Lemon target version
 - Introduction of ring_buffer 5.8
-- !!! Android 13 support BTF 5.15
+- Android 13 support BTF 5.15
 - Introduction of SYSCALL program type 5.15
 - Introduction of kallsyms() in ebpf 5.16
