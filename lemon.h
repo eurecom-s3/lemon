@@ -55,4 +55,9 @@ struct read_mem_result {
     unsigned char buf[HUGE_PAGE_SIZE];
 };
 
+struct read_mem_args {
+    unsigned long long addr; 
+    unsigned long size;
+};
+
 #endif /* LEMON_H */

@@ -31,19 +31,15 @@ struct {
     #endif
 #endif
 
-/* UProbe called at the entry of read_kernel_memory */
-SEC("uprobe//proc/self/exe:read_kernel_memory")
-int read_kernel_memory_uprobe(struct pt_regs *ctx)
-{
-    /* Extract the first two arguments of the function */
-    #ifdef CORE
-        __u64 address = (__u64)(PT_REGS_PARM1_CORE(ctx));
-        __u64 dump_size = (__u64)(PT_REGS_PARM2_CORE(ctx));
-    #else
-        __u64 address = (__u64)(PT_REGS_PARM1(ctx));
-        __u64 dump_size = (__u64)(PT_REGS_PARM2(ctx));
-    #endif
-
+/* VA bits for ARM64 
+ *
+ * Attempts to read a specified chunk of kernel memory starting from a given address,
+ * validating the request against architecture-specific constraints and dump size limits.
+ * The memory contents are copied into a BPF map for retrieval from userspace.
+ * Returns 0 on success or parameter validation failure, and -1 if the BPF map is unavailable.
+ * Return also a specific error code in the map.
+ */
+static int inline read_memory(const __u64 address, const __u64 dump_size) {
     /* Get the map in which save the memory content to pass to userspace */
     int key = 0;
     struct read_mem_result *read_mem_result = bpf_map_lookup_elem(&read_mem_array_map, &key);
@@ -90,6 +86,56 @@ int read_kernel_memory_uprobe(struct pt_regs *ctx)
     #endif
 
     return 0;
+}
+
+/*
+ * read_kernel_memory_uprobe() - Read kernel memory using a Uprobe trigger 
+ *
+ * Uprobe handler for extracting kernel memory from userspace-triggered instrumentation.
+ * Retrieves the target address and dump size from the probed function’s arguments,
+ */
+SEC("uprobe//proc/self/exe:read_kernel_memory")
+int read_kernel_memory_uprobe(struct pt_regs *ctx)
+{
+    /* Extract the first two arguments of the function */
+    #ifdef CORE
+        __u64 address = (__u64)(PT_REGS_PARM1_CORE(ctx));
+        __u64 dump_size = (__u64)(PT_REGS_PARM2_CORE(ctx));
+    #else
+        __u64 address = (__u64)(PT_REGS_PARM1(ctx));
+        __u64 dump_size = (__u64)(PT_REGS_PARM2(ctx));
+    #endif
+
+    /* Read memory! */
+    return read_memory(address, dump_size);
+}
+
+/*
+ * read_kernel_memory_xdp() - XDP program to trigger a kernel memory read
+ * @ctx: Pointer to the XDP context containing packet metadata
+ *
+ * Parses a synthetic packet containing address and size parameters used to 
+ * perform a kernel memory read.
+ */
+SEC("xdp")
+ int read_kernel_memory_xdp(struct xdp_md* ctx) {
+    int ret;
+
+    /* Validate data in fake network packet (needed to bypass eBPF validator )*/
+    void* data = (void*)(long)ctx->data;
+    void* data_end = (void*)(long)ctx->data_end;
+    if((data + sizeof(struct read_mem_args)> data_end)) return XDP_DROP;
+
+    /* Extract arguments from fake packet */
+    struct read_mem_args *args = data;
+    __u64 address = args->addr;
+    __u64 dump_size =  args->size;
+
+    /* Read memory! */
+    ret = read_memory(address, dump_size);
+    if(ret) return XDP_DROP;
+
+    return XDP_PASS;
 }
 
 char _license[] SEC("license") = "GPL";

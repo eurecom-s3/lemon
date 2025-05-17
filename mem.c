@@ -2,6 +2,7 @@
 #include <sys/mman.h>
 #include <unistd.h>
 #include <sys/capability.h>
+#include <bpf/bpf.h>
 
 #include "lemon.h"
 #include "ebpf/mem.ebpf.skel.h"
@@ -27,8 +28,9 @@ struct resource {
 
 extern int check_capability(const cap_value_t cap);
 
-/* eBPF memory read program skeleton */
+/* eBPF memory read program skeleton and fd of the XDP program */
 struct mem_ebpf *mem_ebpf_skel;
+int read_kernel_memory_xdp_fd;
 
 /* File descriptor and mmap() pointer associated to the eBPF map.*/
 int read_mem_result_fd;
@@ -95,10 +97,16 @@ int load_ebpf_mem_progs() {
     }
 
     /* Attach the uprobe to the 'read_kernel_memory' function in the current executable */
-    if (mem_ebpf__attach(mem_ebpf_skel)) {
-        fprintf(stderr, "Failed to attach program\n");
-        return errno;
+    if (!bpf_program__attach(mem_ebpf_skel->progs.read_kernel_memory_uprobe)) {
+        fprintf(stderr, "Failed to attach eBPF Uprobe program, use fallback one...\n");
+
+        read_kernel_memory_xdp_fd = bpf_program__fd(mem_ebpf_skel->progs.read_kernel_memory_xdp);
+        if(read_kernel_memory_xdp_fd < 0) {
+            fprintf(stderr, "Fail to get fd of eBPF callback program\n");
+            return read_kernel_memory_xdp_fd;
+        }
     }
+    else { read_kernel_memory_xdp_fd = 0; }
 
     /* Create the mmap */
     if((ret = init_mmap())) {
@@ -152,6 +160,24 @@ uintptr_t phys_to_virt(const uintptr_t phy_addr) {
  */
 int __attribute__((noinline, optnone)) read_kernel_memory(const uintptr_t addr, const size_t size, __u8 **restrict data)
 {
+    /* If the Uprobe support is not active in kernel read the memory using the eBPF test program syscall trick */
+    if(read_kernel_memory_xdp_fd) {
+        struct read_mem_args args = {addr, size};
+        struct bpf_test_run_opts opts = {
+        .sz = sizeof(struct bpf_test_run_opts),
+        .data_in = &args,
+        .data_size_in = sizeof(struct read_mem_args),
+        };
+
+        /* Call the eBPF XDP program */
+        int ret;
+        if((ret = bpf_prog_test_run_opts(read_kernel_memory_xdp_fd, &opts)) < 0) 
+        {
+            read_mem_result->ret_code = ret;
+            return ret;
+        }
+    }
+
     *data = read_mem_result->buf;
     return read_mem_result->ret_code;
 }
