@@ -36,7 +36,6 @@ static int dump_region(const uintptr_t region_start, const uintptr_t region_end,
         chunk_end = (region_end - chunk_start + 1 > granule) ? chunk_start + granule - 1 : region_end;
         chunk_size = chunk_end - chunk_start + 1;
 
-
         if ((ret = read_kernel_memory(phys_to_virt(chunk_start), chunk_size, &read_data))) {
             fprintf(stderr, "Error reading kernel physical memory. Physical address: 0x%lx, size: 0x%zx. Error code: %d Maybe KFENCE area ?\n", chunk_start, chunk_size, ret);
             
