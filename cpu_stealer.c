@@ -95,7 +95,7 @@ static int join_n_cpu_stealers(int n) {
     }
 
     /* Join all the processes */
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < n - 1; i++) {
         const int ret = pthread_join(threads[i], NULL);
         if (ret) return -1;
     }
@@ -114,14 +114,14 @@ static int join_n_cpu_stealers(int n) {
  * 
  * @param priority: The scheduling priority to set for the stealers threads.
  */
-static int launch_cpu_stealers(const int priority) {
+static int launch_cpu_stealers(const int priority_min, const int priority_max) {
     int ret = 0;
 
     assert(threads == NULL);
     
     /* Allocate thread structs */
     nprocs = get_nprocs();
-    threads = (pthread_t *)malloc((nprocs) * sizeof(pthread_t));
+    threads = (pthread_t *)malloc((nprocs - 1) * sizeof(pthread_t));
     if(!threads) {
         perror("Failed to allocate pthread_t structs");
         return errno;
@@ -134,10 +134,11 @@ static int launch_cpu_stealers(const int priority) {
     }
 
     /* Try to create nproc - 1 threads (the remaining one is the dumper)*/
-    for (int i = 0; i < nprocs; i++) {
+    for (int i = 0; i < nprocs - 1; i++) {
         thread_params *tp = (thread_params*) malloc(sizeof(thread_params));
         tp->cpu = i;
-        tp->priority = priority;
+        if(i == nprocs - 2) { tp->priority = priority_min; }
+        else { tp->priority = priority_max; }
         ret = pthread_create(&threads[i], NULL, thread_function, (void*) tp);
         if (ret) {
             /* Try to join the already created threads and silently ignore errors */
@@ -169,11 +170,17 @@ int increase_priority_and_launch_stealers() {
         return -1;
     }
 
+    const int min_sched = sched_get_priority_min(SCHED_FIFO);
+    if(min_sched == -1) {
+        perror("Failed to obtain min priority value for realtime process class");
+        return -1;
+    }
+
     if(set_priority(max_sched) == -1) {
         return -1;
     }
 
-    launch_cpu_stealers(max_sched - 1);
+    launch_cpu_stealers(min_sched, max_sched);
 
     return 0;
 }

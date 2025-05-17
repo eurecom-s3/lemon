@@ -22,7 +22,7 @@ extern uintptr_t phys_to_virt(const uintptr_t phy_addr);
  * defined by `granule`. If a read fails and `fatal` is false, it retries with the smallest
  * allowed granule (system page size). If that also fails, it writes zero-filled data instead.
  */
-static int dump_region(const uintptr_t region_start, const uintptr_t region_end, unsigned int granule, int (*write_f)(void *restrict, const void *restrict, const unsigned long), void *restrict args, bool fatal) {
+static int dump_region(const uintptr_t region_start, const uintptr_t region_end, unsigned int granule, int (*write_f)(void *restrict, void *restrict, const unsigned long), void *restrict args, bool fatal) {
     int ret = 0;
     const unsigned int min_granule = getpagesize();
     size_t chunk_size;
@@ -76,7 +76,7 @@ static int dump_region(const uintptr_t region_start, const uintptr_t region_end,
  * in chunks using eBPF, and writes the contents to the specified output.
  * On read failures, either aborts or fills the chunk with 0xFF, based on fatal mode.
  */
-int dump(const struct options *restrict opts, const struct ram_regions *restrict ram_regions, int (*write_f)(void *restrict, const void *restrict, const unsigned long), void *restrict args) {
+int dump(const struct options *restrict opts, const struct ram_regions *restrict ram_regions, int (*write_f)(void *restrict, void *restrict, const unsigned long), void *restrict args) {
     int ret = 0;
 
     /* Loop through the system RAM ranges, read the memory ranges and write them on file */
@@ -89,7 +89,7 @@ int dump(const struct options *restrict opts, const struct ram_regions *restrict
 
         /* Write the LiMe header for that RAM region to the file (only if not RAW format)*/
         if(!opts->raw) {
-            const lime_header header = {
+            lime_header header = {
                 .magic = 0x4C694D45,
                 .version = 1,
                 .s_addr = region_pstart,
