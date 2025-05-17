@@ -40,7 +40,7 @@ struct {
  * Returns 0 on success or parameter validation failure, and -1 if the BPF map is unavailable.
  * Return also a specific error code in the map.
  */
-static int inline read_memory(const __u64 address, const __u64 dump_size) {
+static int inline read_memory(__u64 address, const __u64 dump_size) {
     /* Get the map in which save the memory content to pass to userspace */
     int key = 0;
     struct read_mem_result *read_mem_result = bpf_map_lookup_elem(&read_mem_array_map, &key);
