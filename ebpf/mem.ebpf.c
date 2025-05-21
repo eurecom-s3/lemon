@@ -23,7 +23,7 @@ struct {
 /* VA bits for ARM64 
  *
  * Try to get the va bits from the kernel config.
- * Otherwise we try to copmute the actual va bits (runtime) in userspace and inject it here on eBPF
+ * Otherwise we try to compute the actual va bits (runtime) in userspace and inject it here on eBPF
  * program open.
  */
 #ifdef __TARGET_ARCH_arm64
