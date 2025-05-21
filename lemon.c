@@ -124,7 +124,7 @@ int main(int argc, char **argv)
     struct ram_regions ram_regions;
     struct options opts = {0};
     struct argp argp = {options, parse_opt, "", doc};
-    int ret;
+    int ret = EXIT_SUCCESS;
 
     /* Check if is running as root */
     if(getuid() != 0) {
@@ -197,5 +197,5 @@ int main(int argc, char **argv)
         /* Restore kptr_restrict if needed */
         if((ret = toggle_kptr())) return ret;
 
-    return EXIT_SUCCESS;
+    return ret; // TODO rework all the ret values handling
 }

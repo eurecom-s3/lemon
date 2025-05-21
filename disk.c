@@ -42,7 +42,6 @@ static int write_on_disk(void *restrict args, const void *restrict data, const u
  * generic dump function. Ensures data is flushed and file descriptor is closed.
  */
 int dump_on_disk(const struct options *restrict opts, const struct ram_regions *restrict ram_regions) {
-    
     int fd;
     int ret = 0;
 
@@ -61,9 +60,22 @@ int dump_on_disk(const struct options *restrict opts, const struct ram_regions *
     /* Dump! */
     ret = dump(opts, ram_regions, write_on_disk, (void *)&fd);
 
-    if(fd) {
-        if(fsync(fd)) { perror("Fail to finalize writes on dump file"); ret = errno; }
-        if(close(fd)) { perror("Fail to close dump file"); ret = errno; }
+    if(fsync(fd)) {
+        switch (errno) {
+            case EINVAL:
+                /* fd is bound to a special file (e.g., a pipe, FIFO, or
+                 * socket) which does not support synchronization.
+                 */
+                break;
+            default:
+                perror("Failed to finalize writes on dump file");
+                ret = errno;
+        }
+    }
+
+    if(close(fd)) {
+        perror("Failed to close the dump file");
+        ret = errno;
     }
 
     return ret;

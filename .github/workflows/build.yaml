@@ -17,7 +17,7 @@ jobs:
     - name: Install dependencies from apt
       run: |
         sudo apt update
-        sudo apt install -y make clang llvm libbpf-dev libcap-dev linux-tools-generic
+        sudo apt install -y make llvm libbpf-dev libcap-dev linux-tools-generic
     
     - name: Compile with Make
       run: |
@@ -36,3 +36,17 @@ jobs:
           name: lemon.aarch64
           path: "lemon.aarch64"
       continue-on-error: true
+  run:
+    needs: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-24.04-arm, ubuntu-24.04]
+    steps:
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+      - name: Run dump to disk
+        run: |
+          sudo chmod +x ./lemon.$(uname -m)/lemon.$(uname -m)
+          sudo ./lemon.$(uname -m)/lemon.$(uname -m) -d /dev/null
+# TODO build and run on NO CORE
