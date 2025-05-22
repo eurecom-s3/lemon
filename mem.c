@@ -41,13 +41,76 @@ struct read_mem_result *read_mem_result;
     static uintptr_t v2p_offset;
 #elif __TARGET_ARCH_arm64
     static int64_t v2p_offset;
-    #ifndef CORE
-        static uintptr_t page_offset;
-    #endif
 #endif
 
 /*Address of root of struct resources list (physical memory regions list) */
 static uintptr_t iomem_resource;
+
+#if defined(__TARGET_ARCH_arm64)
+   /*
+    * @brief Check if memory mapping respects the given address
+    * @param addr: The address to check
+    *
+    * Attempts to mmap a 1-byte region at the specified address. If the mmap operation is successful 
+    * and the address is valid (greater than or equal to the specified address) the function returns 
+    * true. Otherwise, it returns false.
+    * 
+    * @return: true if the mmap succeeds at addr, false otherwise.
+    */
+    static bool is_mmap_respecting_address(void *addr) {
+        const size_t size = 1;
+        void *mapped_addr = mmap(addr, size, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+
+        if (mapped_addr == MAP_FAILED) {
+            return false;
+        }
+        
+        if (munmap(mapped_addr, size) == -1) {
+            perror("Failed to munmap");
+            return false;
+        }
+
+        /* Check if the mapped address is the desired address, also greater is ok */
+        if (mapped_addr >= addr) {
+            return true;
+        } else {
+            return false;
+        }
+    }
+
+   /*
+    * @brief Determine the actual virtual address bits for ARM64
+    *
+    * Determines the number of virtual address bits used by the system on ARM64 
+    * by checking the mmap behavior for various address values defined in arch/arm64/Kconfig. 
+    * The function first checks the most common virtual address bit settings (48 and 52), 
+    * then falls back to testing other possible values (47, 42, 39, 36) if necessary. 
+    * @return Number of virtual address bits used (e.g., 48, 52).
+    */
+    static unsigned long arm64_vabits_actual() {
+        unsigned long vabits = 0;
+
+        /* VA_BITS = 48 is probably the most common check it first */
+        if (is_mmap_respecting_address((void*)(1ul << (48 - 1)))) {
+            if (is_mmap_respecting_address((void*)(1ul << (52 - 1)))) {
+                vabits = 52;
+            } else {
+                vabits = 48;
+            }
+        } else {
+            /* Remaining cases */
+            const unsigned long va_bits[] = {47, 42, 39, 36};
+            for(int i = 0; i < 4; ++i) {
+                if (is_mmap_respecting_address((void*)(1ul << (va_bits[i] - 1)))) {
+                    vabits = va_bits[i];
+                    break;
+                }
+            }
+        }
+
+        return vabits;
+    }
+#endif // __TARGET_ARCH_arm64
 
 /*
  * init_mmap() - Initializes a shared memory mapping for reading memory results from eBPF
@@ -89,6 +152,19 @@ int load_ebpf_mem_progs() {
         perror("Failed to open BPF skeleton");
         return errno;
     }
+
+    /* ARM64 phys to virt translation requires two values, one of the two (CONFIG_ARM64_VA_BITS)
+     * might not be available from eBPF so we try to compute it at runtime here and we pass it to
+     * eBPF.
+     */
+    #if defined(__TARGET_ARCH_arm64)
+        unsigned long vabits = arm64_vabits_actual();
+        if (vabits == 0) {
+            WARN("Failed to determine runtime virtual address bits, defaulting to 48");
+            vabits = 48;
+        }
+        mem_ebpf_skel->data->runtime_va_bits = vabits;
+    #endif
 
     /* Load the BPF objectes */
     if (mem_ebpf__load(mem_ebpf_skel)) {
@@ -138,12 +214,7 @@ uintptr_t phys_to_virt(const uintptr_t phy_addr) {
     #ifdef __TARGET_ARCH_x86
         return phy_addr + v2p_offset;
     #elif __TARGET_ARCH_arm64
-        uintptr_t vaddr = phy_addr - v2p_offset;
-        #ifndef CORE
-            /* If in CO-RE mode the translation will be finished in the eBPF program */
-            vaddr |= page_offset;
-        #endif
-        return vaddr;
+        return phy_addr - v2p_offset;
     #else
         return phy_addr;
     #endif
@@ -181,70 +252,6 @@ int __attribute__((noinline, optnone)) read_kernel_memory(const uintptr_t addr, 
     *data = read_mem_result->buf;
     return read_mem_result->ret_code;
 }
-
-#if defined(__TARGET_ARCH_arm64) && !defined(CORE)
-   /*
-    * is_mmap_respecting_address() - Check if memory mapping respects the given address
-    * @addr: The address to check
-    *
-    * Attempts to mmap a 1-byte region at the specified address. If the mmap operation is successful 
-    * and the address is valid (greater than or equal to the specified address), the function returns 
-    * true. Otherwise, it returns false.
-    */
-    static bool is_mmap_respecting_address(void *addr) {
-        unsigned int size = getpagesize();
-        void *mapped_addr = mmap(addr, size, PROT_READ, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-
-        if (mapped_addr == MAP_FAILED) {
-            return false;
-        }
-        
-        if (munmap(mapped_addr, size) == -1) {
-            return false;
-        }
-
-        /* Check if the mapped address is the desired address, also greater is ok */
-        if (mapped_addr >= addr) {
-            return true;
-        } else {
-            return false;
-        }
-    }
-
-   /*
-    * arm64_vabits_actual() - Determine the actual virtual address bits for ARM64
-    *
-    * Determines the number of virtual address bits used by the system on ARM64 
-    * by checking the mmap behavior for various address values defined in arch/arm64/Kconfig. 
-    * The function first checks the most common virtual address bit settings (48 and 52), 
-    * then falls back to testing other possible values (47, 42, 39, 36) if necessary. 
-    * Returns the number of virtual address bits used (e.g., 48, 52).
-    */
-    static unsigned long arm64_vabits_actual() {
-        unsigned long vabits = 0;
-
-        /* VA_BITS = 48 is probably the most common check it first */
-        if (is_mmap_respecting_address((void*)(1ul << 47))) {
-            if (is_mmap_respecting_address((void*)(1ul << 51))) {
-                vabits = 52;
-            } else {
-                vabits = 48;
-            }
-        } else {
-            /* Remaining cases */
-            const unsigned long va_bits[] = {47, 42, 39, 36};
-            for(int i = 0; i < 4; ++i) {
-                if (is_mmap_respecting_address((void*)(1ul << (va_bits[i] - 1)))) {
-                    vabits = va_bits[i];
-                    break;
-                }
-            }
-        }
-
-        return vabits;
-    }
-#endif
-
 
 /*
  * parse_kallsyms_line() - Extracts the address of a specific kernel symbol from a text line
@@ -345,23 +352,6 @@ static int parse_kallsyms()
         fprintf(stderr, "Symbol %s not found in /proc/kallsyms\n", v2p_symbol);
         return EIO;
     }
-
-    /* We are able now to translate phys to virt addresses for X64. ARM64 instead is more complex 
-     * and require two values, one of the two (CONFIG_ARM64_VA_BITS) available only in the eBPF 
-     * CO-RE program or determined at runtime here for non CO-RE ones.
-     *
-     * TODO: false! it does not depends by CO-RE, but on availability of the kernel config (see libbpf)
-     */
-    #if defined(__TARGET_ARCH_arm64) && !defined(CORE)
-        /* If the kernel is not CORE we determine the CONFIG_ARM64_VA_BITS using the runtime value. */
-        unsigned long vabits = arm64_vabits_actual();
-        if (vabits == 0) {
-            fprintf(stderr, "Failed to determine virtual address bits, defaulting to 48\n");
-            vabits = 48;
-        }
-        page_offset = -1L << vabits;
-
-    #endif
 
     return 0;
 }

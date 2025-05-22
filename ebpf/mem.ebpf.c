@@ -22,13 +22,13 @@ struct {
 
 /* VA bits for ARM64 
  *
- * If we have CORE, we can precisely get the va bits from the kernel config.
- * otherwise we try to guess the actual va bits (runtime) in userspace.
+ * Try to get the va bits from the kernel config.
+ * Otherwise we try to compute the actual va bits (runtime) in userspace and inject it here on eBPF
+ * program open.
  */
 #ifdef __TARGET_ARCH_arm64
-    #ifdef CORE
-        extern unsigned long CONFIG_ARM64_VA_BITS __kconfig __weak;
-    #endif
+    extern unsigned long CONFIG_ARM64_VA_BITS __kconfig __weak;
+    unsigned long runtime_va_bits SEC(".data");
 #endif
 
 /*
@@ -54,16 +54,18 @@ static int inline read_memory(__u64 address, const __u64 dump_size) {
         return 0;
     }
 
-    /* ARM64 address needs to be shifted with an offset (without CORE we do it in userspace) */
+    /* ARM64 phys to virt offset depends also on virtual addresses number of bits */
     #ifdef __TARGET_ARCH_arm64
-        #ifdef CORE
+        if (CONFIG_ARM64_VA_BITS != 0) {
             address |= 0xffffffffffffffff << CONFIG_ARM64_VA_BITS;
-        #endif
+        } else {
+            address |= 0xffffffffffffffff << runtime_va_bits;
+        }
     #endif
 
     /* Ensure parameters are sanitized (some checks are needed to bypass eBPF type checking) */
     #ifdef __TARGET_ARCH_x86
-        if (address < 0 || address < 0xffff800000000000){
+        if (address < 0 || address < 0xff00000000000000){
     #elif __TARGET_ARCH_arm64
         if (address < 0 || address < 0xfff0000000000000){
     #else
