@@ -4,7 +4,7 @@
 #include <stdbool.h>
 #include <errno.h>
 
-#define MIN_MAJOR_LINUX         5 /* Minimium kernel version supported */
+#define MIN_MAJOR_LINUX         5                       /* Minimium kernel version supported */
 #define MIN_MINOR_LINUX         5
 
 #define HUGE_PAGE_SIZE          2 * 1024 * 1024         /* Same for huge pages */

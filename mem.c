@@ -200,7 +200,7 @@ int load_ebpf_mem_progs() {
     mem_ebpf_skel = mem_ebpf__open();
     if(!mem_ebpf_skel) {
         perror("Failed to open BPF skeleton");
-        return errno;
+        return -errno;
     }
 
     /* ARM64 phys to virt translation requires two values, one of the two (CONFIG_ARM64_VA_BITS)
@@ -219,7 +219,7 @@ int load_ebpf_mem_progs() {
     /* Load the BPF objectes */
     if (mem_ebpf__load(mem_ebpf_skel)) {
         perror("Failed to load BPF object");
-        return errno;
+        return -errno;
     }
 
     /* Attach the uprobe to the 'read_kernel_memory' function in the current executable */
@@ -288,7 +288,6 @@ void cleanup_mem_ebpf() {
  * Performs architecture-specific translation using kernel direct mapping.
  * Currently supports x86_64 and ARM64 only.
  */
-
 uintptr_t phys_to_virt(const uintptr_t phy_addr) {
     #ifdef __TARGET_ARCH_x86
         return phy_addr + v2p_offset;
@@ -388,12 +387,11 @@ int __attribute__((noinline, optnone)) read_kernel_memory(const uintptr_t addr, 
  * Scans the line for the symbol name and extracts its address using sscanf.
  * Returns 1 on success, 0 on not looked for element or a negative error code from read_kernel_memory().
  */
-
 static int inline parse_kallsyms_line(const char *restrict line, const char *restrict symbol, uintptr_t *restrict current_symb_addr) {
     char current_symb_name[256];
 
     /* Read the address and check if the it is the symbol that we look for */
-    if ((sscanf(line, "%lx %*c %255s\n",current_symb_addr, current_symb_name) != 2) || strncmp(current_symb_name, symbol, strlen(symbol)))
+    if ((sscanf(line, "%lx %*c %255s\n", current_symb_addr, current_symb_name) != 2) || strncmp(current_symb_name, symbol, strlen(symbol)))
         return 0;
 
     /* Check that address is not 0 */
@@ -405,10 +403,10 @@ static int inline parse_kallsyms_line(const char *restrict line, const char *res
  *
  * Opens /proc/kallsyms, searches for the appropriate symbol (e.g., "page_offset_base" or 
  * "memstart_addr" and "iomem_resource") based on architecture, and retrieves the physical-to-virtual address 
- * translation offset and the pointer to the tree of physical memory regions. Returns 0 on success, or an error code on failure.
+ * translation offset and the pointer to the tree of physical memory regions. 
+ * Returns 0 on success, or an error code on failure.
  */
-static int parse_kallsyms()
-{
+static int parse_kallsyms() {
     FILE *fp;
     char line[256];
     __u8 *data = NULL;
@@ -488,11 +486,10 @@ static int parse_kallsyms()
  *
  * Opens /proc/iomem, searches for "System RAM" regions, and populates the provided
  * ram_regions struct with the start and end addresses of each region. The function
- * reallocates memory as needed to accommodate additional regions. Returns 0 on success,
- * or an error code on failure.
+ * reallocates memory as needed to accommodate additional regions. 
+ * Returns 0 on success, or an error code on failure.
  */
-static int get_iomem_regions_user(struct ram_regions *restrict ram_regions)
-{
+static int get_iomem_regions_user(struct ram_regions *restrict ram_regions) {
     FILE *fp;
     char line[256];
     int slot_availables;
@@ -565,11 +562,10 @@ static int get_iomem_regions_user(struct ram_regions *restrict ram_regions)
  *
  * Read struct resources from kernel, and populates the provided
  * ram_regions struct with the start and end addresses of each region. The function
- * reallocates memory as needed to accommodate additional regions. Returns 0 on success,
- * or an error code on failure.
+ * reallocates memory as needed to accommodate additional regions. 
+ * Returns 0 on success, or an error code on failure.
  */
-static int get_iomem_regions_kernel(struct ram_regions *restrict ram_regions)
-{
+static int get_iomem_regions_kernel(struct ram_regions *restrict ram_regions) {
     int slot_availables;
     __u8 *data = NULL;
     struct resource *res, *next_res;
@@ -590,7 +586,7 @@ static int get_iomem_regions_kernel(struct ram_regions *restrict ram_regions)
      * Is it possible to have "System RAM" regions inside non System RAM regions? I don't think so. 
      */
 
-    /* Obrain the address child of the root struct */
+    /* Obtain the address child of the root struct */
     if((err = read_kernel_memory(iomem_resource, sizeof(struct resource), &data))) {
         fprintf(stderr, "Error reading root struct resource");
         return err;

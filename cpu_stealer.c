@@ -29,7 +29,7 @@ typedef struct {
  * @param priority: The priority to set for the current process.
  * @return 0 on success, -1 on failure.
  */
-static int set_priority(const int priority){
+static int set_priority(const int priority) {
     const struct sched_param sparam = {
         .sched_priority = priority
     };
