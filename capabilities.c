@@ -12,9 +12,10 @@
  * 
  *  Capabilities needed in some cases
  *  
- *  CAP_SYS_ADMIN   ->  needed to change /proc/sys/kernel/kptr_restrict from 2 to 0 (not needed if set to 1 or 0), needed to access
+ *  CAP_SYS_ADMIN    -> needed to change /proc/sys/kernel/kptr_restrict from 2 to 0 (not needed if set to 1 or 0), needed to access
  *                      /proc/iomem if CONFIG_KALLSYMS_ALL is not active and so iomem_resources is not available, needed on old kernels
  *  CAP_DAC_OVERRIDE -> needed to create a brand new dump file in the case the directory is not owned by the user running LEMON
+ *  CAP_NET_RAW      -> needed to create raw sockets for XDP
  */
 
 

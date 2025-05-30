@@ -3,6 +3,7 @@
     #include <bpf/bpf_core_read.h>
 #else
     #include <linux/bpf.h>
+    #include <linux/if_ether.h>
     #include <asm/ptrace.h>
 #endif
 
@@ -123,14 +124,21 @@ int read_kernel_memory_uprobe(struct pt_regs *ctx)
 SEC("xdp")
  int read_kernel_memory_xdp(struct xdp_md* ctx) {
     int ret;
-
-    /* Validate data in fake network packet (needed to bypass eBPF validator )*/
     void* data = (void*)(long)ctx->data;
     void* data_end = (void*)(long)ctx->data_end;
-    if((data + sizeof(struct read_mem_args)> data_end)) return XDP_DROP;
+    
+    /* Validate Ethernet header */
+    struct ethhdr *eth = data;
+    if ((void*)(eth + 1) > data_end) {
+        return XDP_DROP;
+    }
+    
+    /* Skip Ethernet header and validate payload */
+    struct read_mem_args *args = (struct read_mem_args*)(eth + 1);
+    if ((void*)(args + 1) > data_end) {
+        return XDP_DROP;
+    }
 
-    /* Extract arguments from fake packet */
-    struct read_mem_args *args = data;
     __u64 address = args->addr;
     __u64 dump_size =  args->size;
 

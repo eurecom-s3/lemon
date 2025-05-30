@@ -1,8 +1,12 @@
+#include <arpa/inet.h>
+#include <bpf/bpf.h>
+#include <linux/if_packet.h>
+#include <linux/if_ether.h>
+#include <net/if.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
-#include <unistd.h>
 #include <sys/capability.h>
-#include <bpf/bpf.h>
+#include <unistd.h>
 
 #include "lemon.h"
 #include "ebpf/mem.ebpf.skel.h"
@@ -20,17 +24,30 @@ struct resource {
     struct resource *parent, *sibling, *child;
 };
 
+/* Ethernet frame structure for XDP trigger packets */
+struct trigger_frame {
+    struct ethhdr eth_header;
+    struct read_mem_args args;
+    char padding[ETH_ZLEN - sizeof(struct ethhdr) - sizeof(struct read_mem_args)];
+} __attribute__((packed));
+
 #define IORESOURCE_MEM		        0x00000200
 #define IORESOURCE_SYSRAM	        0x01000000
 #define IORESOURCE_BUSY		        0x80000000
 #define IORESOURCE_SYSTEM_RAM		(IORESOURCE_MEM|IORESOURCE_SYSRAM)
-#define SYSTEM_RAM_FLAGS            (IORESOURCE_SYSTEM_RAM | IORESOURCE_BUSY)
+#define SYSTEM_RAM_FLAGS                (IORESOURCE_SYSTEM_RAM | IORESOURCE_BUSY)
 
 extern int check_capability(const cap_value_t cap);
 
 /* eBPF memory read program skeleton and fd of the XDP program */
-struct mem_ebpf *mem_ebpf_skel;
 int read_kernel_memory_xdp_fd;
+struct mem_ebpf *mem_ebpf_skel;
+
+/* XDP attachment and network trigger resources */
+int ifindex = -1;
+int raw_sockfd = -1;
+struct bpf_link *bpf_prog_link = NULL;
+const char *loopback_interface = "lo";
 
 /* File descriptor and mmap() pointer associated to the eBPF map.*/
 int read_mem_result_fd;
@@ -133,6 +150,39 @@ static int init_mmap() {
 }
 
 /*
+ * init_raw_socket() - Create and bind a raw socket for sending Ethernet frames
+ *
+ * Creates a raw socket with ETH_P_ALL protocol to send custom Ethernet frames,
+ * and binds it to loopback interface.
+ * Returns 0 on success, negative errno value on failure.
+ */
+static int init_raw_socket(void) {
+    struct sockaddr_ll sll;
+
+    /* Create raw socket */
+    raw_sockfd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
+    if (raw_sockfd < 0) {
+        perror("Failed to create raw socket for XDP trigger");
+        return -errno;
+    }
+
+    /* Bind raw socket to loopback interface */
+    memset(&sll, 0, sizeof(sll));
+    sll.sll_family = AF_PACKET;
+    sll.sll_ifindex = ifindex;
+    sll.sll_protocol = htons(ETH_P_ALL);
+
+    if (bind(raw_sockfd, (struct sockaddr*)&sll, sizeof(sll)) < 0) {
+        perror("Failed to bind raw socket to interface");
+        close(raw_sockfd);
+        raw_sockfd = -1;
+        return -errno;
+    }
+
+    return 0;
+}
+
+/*
  * load_ebpf_mem_progs() - Initialize and attach eBPF programs for memory access
  *
  * Opens, loads, attaches the eBPF programs, and sets up shared memory. 
@@ -173,17 +223,34 @@ int load_ebpf_mem_progs() {
     }
 
     /* Attach the uprobe to the 'read_kernel_memory' function in the current executable */
-    if (!bpf_program__attach(mem_ebpf_skel->progs.read_kernel_memory_uprobe)) {
-        fprintf(stderr, "Failed to attach eBPF Uprobe program, use fallback one...\n");
-
-        read_kernel_memory_xdp_fd = bpf_program__fd(mem_ebpf_skel->progs.read_kernel_memory_xdp);
-        if(read_kernel_memory_xdp_fd < 0) {
-            fprintf(stderr, "Fail to get fd of eBPF callback program\n");
-            return read_kernel_memory_xdp_fd;
+    bpf_prog_link = bpf_program__attach(mem_ebpf_skel->progs.read_kernel_memory_uprobe);
+    if (!bpf_prog_link) {
+        fprintf(stderr, "Failed to attach eBPF Uprobe program, use XDP fallback one...\n");
+        
+        /* Check if can create raw sockets for XDP */
+        if (check_capability(CAP_NET_RAW) <= 0) {
+            WARN("LEMON does not have CAP_NET_RAW to create raw sockets for XDP");
+        }
+        
+        /* Get loopback interface index by name "lo" (usually 1) */
+        ifindex = if_nametoindex(loopback_interface);
+        if (ifindex <= 0) {
+            perror("Failed to get interface index");
+            return -errno;
+        }
+        
+        /* Attach XDP program to the interface */
+        bpf_prog_link = bpf_program__attach_xdp(mem_ebpf_skel->progs.read_kernel_memory_xdp, ifindex);
+        if (!bpf_prog_link) {
+            fprintf(stderr, "Failed to attach XDP program to interface %s (index: %d)\n", loopback_interface, ifindex);
+        }
+        
+        /* Create socket for sending trigger packets */
+        if ((ret = init_raw_socket())) {
+            return ret;
         }
     }
-    else { read_kernel_memory_xdp_fd = 0; }
-
+    
     /* Create the mmap */
     if((ret = init_mmap())) {
         return ret;
@@ -199,6 +266,18 @@ void cleanup_mem_ebpf() {
     if(mem_ebpf_skel) {
         if(read_mem_result) munmap(read_mem_result, sizeof(struct read_mem_result));
         mem_ebpf__destroy(mem_ebpf_skel);
+    }
+    
+    /* Destroy bpf_link if it exists*/
+    if (bpf_prog_link) {
+        bpf_link__destroy(bpf_prog_link);
+        bpf_prog_link = NULL;
+    }
+
+    /* Close raw socket if it's open */
+    if (raw_sockfd) {
+        close(raw_sockfd);
+        raw_sockfd = -1;
     }
 }
 
@@ -221,29 +300,76 @@ uintptr_t phys_to_virt(const uintptr_t phy_addr) {
 }
 
 /*
- * read_kernel_memory() - Trigger eBPF UProbe to read kernel virtual memory
+ * send_xdp_trigger_packet() - Send Ethernet frame to trigger XDP program
+ * @addr: Virtual address of the memory region to read
+ * @size: Size of the memory region to read
+ * 
+ * Constructs and sends an Ethernet frame with the memory read arguments as payload
+ * to the loopback interface triggering the XDP program to perform the read.
+ * Uses a minimal Ethernet frame with broadcast destination.
+ * Returns 0 on success, negative errno value on failure.
+ */
+static int send_xdp_trigger_packet(const uintptr_t addr, const size_t size) {
+    struct trigger_frame frame;
+    struct sockaddr_ll dest_addr;
+    ssize_t sent_bytes;
+    
+    /* Initialize frame structure */
+    memset(&frame, 0, sizeof(frame));
+    
+    /* Setup Ethernet header, and use broadcast address for simplicity */
+    memset(frame.eth_header.h_dest, 0xFF, ETH_ALEN);    /* Broadcast destination */
+    memset(frame.eth_header.h_source, 0x00, ETH_ALEN);
+    frame.eth_header.h_proto = htons(0x0800);
+    
+    /* Setup memory read arguments in payload */
+    frame.args.addr = addr;
+    frame.args.size = size;
+    
+    /* Setup destination address */
+    memset(&dest_addr, 0, sizeof(dest_addr));
+    dest_addr.sll_family = AF_PACKET;
+    dest_addr.sll_ifindex = ifindex;
+    dest_addr.sll_protocol = htons(ETH_P_ALL);
+    dest_addr.sll_halen = ETH_ALEN;
+    memset(dest_addr.sll_addr, 0xFF, ETH_ALEN);  /* Broadcast destination */
+    
+    /* Send the frame */
+    sent_bytes = sendto(raw_sockfd, &frame, sizeof(frame), 0,
+                       (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+    
+    if (sent_bytes < 0) {
+        perror("Failed to send XDP trigger packet");
+        return -errno;
+    }
+    
+    /* For raw packets, partial send should not happen */
+    if (sent_bytes != sizeof(frame)) {
+        fprintf(stderr, "Incomplete packet send: %zd of %zu bytes\n", 
+                sent_bytes, sizeof(frame));
+        return -EIO;
+    }
+    
+    return 0;
+}
+
+/*
+ * read_kernel_memory() - Trigger eBPF UProbe or XDP to read kernel virtual memory
  * @addr: Virtual address of the memory region to read
  * @size: Size of the memory region to read
  * @data: Pointer to store the output data
  *
- * This function triggers an eBPF UProbe to read the specified memory region in kernel space.
+ * This function triggers an eBPF UProbe or XDP to read the specified memory region in kernel space.
  * The function is marked with `noinline` and `optnone` to ensure the code is not optimized or inlined by the compiler.
  */
-int __attribute__((noinline, optnone)) read_kernel_memory(const uintptr_t addr, const size_t size, __u8 **restrict data)
-{
-    /* If the Uprobe support is not active in kernel read the memory using the eBPF test program syscall trick */
-    if(read_kernel_memory_xdp_fd) {
-        struct read_mem_args args = {addr, size};
-        struct bpf_test_run_opts opts = {
-        .sz = sizeof(struct bpf_test_run_opts),
-        .data_in = &args,
-        .data_size_in = sizeof(struct read_mem_args),
-        };
-
-        /* Call the eBPF XDP program */
+int __attribute__((noinline, optnone)) read_kernel_memory(const uintptr_t addr, const size_t size, __u8 **restrict data) {
+    /* If the Uprobe support is not active in kernel, use XDP to read the memory*/
+    if(raw_sockfd > 0) {
         int ret;
-        if((ret = bpf_prog_test_run_opts(read_kernel_memory_xdp_fd, &opts)) < 0) 
-        {
+        
+        /* Send XDP trigger packet */
+        ret = send_xdp_trigger_packet(addr, size);
+        if (ret < 0) {
             read_mem_result->ret_code = ret;
             return ret;
         }
