@@ -44,7 +44,6 @@ int read_kernel_memory_xdp_fd;
 struct mem_ebpf *mem_ebpf_skel;
 
 /* XDP attachment and network trigger resources */
-int ifindex = -1;
 int raw_sockfd = -1;
 struct bpf_link *bpf_prog_link = NULL;
 const char *loopback_interface = "lo";
@@ -156,7 +155,7 @@ static int init_mmap() {
  * and binds it to loopback interface.
  * Returns 0 on success, negative errno value on failure.
  */
-static int init_raw_socket(void) {
+static int init_raw_socket(int ifindex) {
     struct sockaddr_ll sll;
 
     /* Create raw socket */
@@ -225,7 +224,7 @@ int load_ebpf_mem_progs() {
     /* Attach the uprobe to the 'read_kernel_memory' function in the current executable */
     bpf_prog_link = bpf_program__attach(mem_ebpf_skel->progs.read_kernel_memory_uprobe);
     if (!bpf_prog_link) {
-        fprintf(stderr, "Failed to attach eBPF Uprobe program, use XDP fallback one...\n");
+        fprintf(stderr, "Failed to attach eBPF Uprobe program, use XDP fallback...\n");
         
         /* Check if can create raw sockets for XDP */
         if (check_capability(CAP_NET_RAW) <= 0) {
@@ -233,7 +232,7 @@ int load_ebpf_mem_progs() {
         }
         
         /* Get loopback interface index by name "lo" (usually 1) */
-        ifindex = if_nametoindex(loopback_interface);
+        int ifindex = if_nametoindex(loopback_interface);
         if (ifindex <= 0) {
             perror("Failed to get interface index");
             return -errno;
@@ -246,7 +245,7 @@ int load_ebpf_mem_progs() {
         }
         
         /* Create socket for sending trigger packets */
-        if ((ret = init_raw_socket())) {
+        if ((ret = init_raw_socket(ifindex))) {
             return ret;
         }
     }
@@ -309,9 +308,12 @@ uintptr_t phys_to_virt(const uintptr_t phy_addr) {
  * Returns 0 on success, negative errno value on failure.
  */
 static int send_xdp_trigger_packet(const uintptr_t addr, const size_t size) {
+    int ifindex;
+    ssize_t sent_bytes;
     struct trigger_frame frame;
     struct sockaddr_ll dest_addr;
-    ssize_t sent_bytes;
+    
+     ifindex = if_nametoindex(loopback_interface);
     
     /* Initialize frame structure */
     memset(&frame, 0, sizeof(frame));
