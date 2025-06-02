@@ -1,14 +1,26 @@
 #ifdef CORE
     #include "../vmlinux.h"
     #include <bpf/bpf_core_read.h>
+
+    #ifndef ETH_P_IP
+        #define ETH_P_IP 0x0800
+    #endif
+
+    #ifndef IPPROTO_UDP
+        #define IPPROTO_UDP 17
+    #endif
 #else
+    #include <asm/ptrace.h>
     #include <linux/bpf.h>
     #include <linux/if_ether.h>
-    #include <asm/ptrace.h>
+    #include <linux/in.h>
+    #include <linux/ip.h>
+    #include <linux/udp.h>
 #endif
 
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
+#include <bpf/bpf_endian.h>
 
 #include "../lemon.h"
 
@@ -114,37 +126,77 @@ int read_kernel_memory_uprobe(struct pt_regs *ctx)
     return read_memory(address, dump_size);
 }
 
+#define TRIGGER_PACKET_PORT 9999
+#define TRIGGER_PACKET_ADDR 0x7f000001 /* 127.0.0.1 */
+
 /*
  * read_kernel_memory_xdp() - XDP program to trigger a kernel memory read
  * @ctx: Pointer to the XDP context containing packet metadata
  *
- * Parses a synthetic packet containing address and size parameters used to 
- * perform a kernel memory read.
+ * Parses a UDP packet containing address and size parameters used to
+ * perform a kernel memory read. Expects UDP packets to 127.0.0.1:9999.
  */
 SEC("xdp")
- int read_kernel_memory_xdp(struct xdp_md* ctx) {
-    int ret;
+int read_kernel_memory_xdp(struct xdp_md* ctx) {
     void* data = (void*)(long)ctx->data;
     void* data_end = (void*)(long)ctx->data_end;
-    
+
     /* Validate Ethernet header */
     struct ethhdr *eth = data;
     if ((void*)(eth + 1) > data_end) {
         return XDP_DROP;
     }
-    
-    /* Skip Ethernet header and validate payload */
-    struct read_mem_args *args = (struct read_mem_args*)(eth + 1);
+
+    /* Check if this is an IP packet */
+    if (eth->h_proto != bpf_htons(ETH_P_IP)) {
+        return XDP_PASS;
+    }
+
+    /* Validate and parse IP header */
+    struct iphdr *ip = (struct iphdr*)(eth + 1);
+    if ((void*)(ip + 1) > data_end) {
+        return XDP_DROP;
+    }
+
+    /* Check if this is a UDP packet */
+    if (ip->protocol != IPPROTO_UDP) {
+        return XDP_PASS;
+    }
+
+    /* Check if source/dest is loopback */
+    if (ip->saddr != bpf_htonl(TRIGGER_PACKET_ADDR) ||  ip->daddr != bpf_htonl(TRIGGER_PACKET_ADDR)) {
+        return XDP_PASS;
+    }
+
+    /* Validate IP header length */
+    if (ip->ihl < 5) {
+        return XDP_DROP;
+    }
+
+    /* Validate UDP header */
+    struct udphdr *udp = (struct udphdr*)((char*)ip + (ip->ihl * 4));
+    if ((void*)(udp + 1) > data_end) {
+        return XDP_DROP;
+    }
+
+    /* Check destination port */
+    if (udp->dest != bpf_htons(TRIGGER_PACKET_PORT)) {
+        return XDP_PASS;
+    }
+
+    /* Validate payload */
+    struct read_mem_args *args = (struct read_mem_args*)(udp + 1);
     if ((void*)(args + 1) > data_end) {
         return XDP_DROP;
     }
 
     __u64 address = args->addr;
-    __u64 dump_size =  args->size;
+    __u64 dump_size = args->size;
 
     /* Read memory! */
-    ret = read_memory(address, dump_size);
-    if(ret) return XDP_DROP;
+    if (read_memory(address, dump_size)) {
+        return XDP_DROP;
+    }
 
     return XDP_PASS;
 }

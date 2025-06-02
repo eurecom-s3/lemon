@@ -1,7 +1,5 @@
 #include <arpa/inet.h>
 #include <bpf/bpf.h>
-#include <linux/if_packet.h>
-#include <linux/if_ether.h>
 #include <net/if.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
@@ -24,31 +22,23 @@ struct resource {
     struct resource *parent, *sibling, *child;
 };
 
-/* Ethernet frame structure for XDP trigger packets */
-struct trigger_frame {
-    struct ethhdr eth_header;
-    struct read_mem_args args;
-    char padding[ETH_ZLEN - sizeof(struct ethhdr) - sizeof(struct read_mem_args)];
-} __attribute__((packed));
-
 #define IORESOURCE_MEM		        0x00000200
 #define IORESOURCE_SYSRAM	        0x01000000
 #define IORESOURCE_BUSY		        0x80000000
 #define IORESOURCE_SYSTEM_RAM		(IORESOURCE_MEM|IORESOURCE_SYSRAM)
-#define SYSTEM_RAM_FLAGS                (IORESOURCE_SYSTEM_RAM | IORESOURCE_BUSY)
+#define SYSTEM_RAM_FLAGS            (IORESOURCE_SYSTEM_RAM | IORESOURCE_BUSY)
 
 extern int check_capability(const cap_value_t cap);
 
-/* eBPF memory read program skeleton and fd of the XDP program */
-int read_kernel_memory_xdp_fd;
+/* eBPF memory read program skeleton */
 struct mem_ebpf *mem_ebpf_skel;
 
-/* XDP attachment and network trigger resources */
-int raw_sockfd = -1;
-struct bpf_link *bpf_prog_link = NULL;
+/* XDP and UDP trigger resources */
+int udp_sockfd = -1;
 const char *loopback_interface = "lo";
+struct bpf_link *bpf_prog_link = NULL;
 
-/* File descriptor and mmap() pointer associated to the eBPF map.*/
+/* File descriptor and mmap() pointer associated to the eBPF map */
 int read_mem_result_fd;
 struct read_mem_result *read_mem_result;
 
@@ -59,7 +49,7 @@ struct read_mem_result *read_mem_result;
     static int64_t v2p_offset;
 #endif
 
-/*Address of root of struct resources list (physical memory regions list) */
+/* Address of root of struct resources list (physical memory regions list) */
 static uintptr_t iomem_resource;
 
 #if defined(__TARGET_ARCH_arm64)
@@ -149,34 +139,26 @@ static int init_mmap() {
 }
 
 /*
- * init_raw_socket() - Create and bind a raw socket for sending Ethernet frames
+ * init_udp_socket() - Create and configure UDP socket for sending trigger packets
  *
- * Creates a raw socket with ETH_P_ALL protocol to send custom Ethernet frames,
- * and binds it to loopback interface.
+ * Creates a UDP socket for sending XDP trigger packets to the loopback interface.
  * Returns 0 on success, negative errno value on failure.
  */
-static int init_raw_socket(int ifindex) {
-    struct sockaddr_ll sll;
+static int init_udp_socket() {
+    struct sockaddr_in local_addr;
 
-    /* Create raw socket */
-    raw_sockfd = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
-    if (raw_sockfd < 0) {
-        perror("Failed to create raw socket for XDP trigger");
+    /* Create UDP socket */
+    udp_sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (udp_sockfd < 0) {
+        perror("Failed to create UDP socket for XDP trigger");
         return -errno;
     }
 
-    /* Bind raw socket to loopback interface */
-    memset(&sll, 0, sizeof(sll));
-    sll.sll_family = AF_PACKET;
-    sll.sll_ifindex = ifindex;
-    sll.sll_protocol = htons(ETH_P_ALL);
-
-    if (bind(raw_sockfd, (struct sockaddr*)&sll, sizeof(sll)) < 0) {
-        perror("Failed to bind raw socket to interface");
-        close(raw_sockfd);
-        raw_sockfd = -1;
-        return -errno;
-    }
+    /* Setup local address structure for binding*/
+    memset(&local_addr, 0, sizeof(local_addr));
+    local_addr.sin_family = AF_INET;
+    local_addr.sin_addr.s_addr = INADDR_ANY;
+    local_addr.sin_port = 0;
 
     return 0;
 }
@@ -226,11 +208,6 @@ int load_ebpf_mem_progs() {
     if (!bpf_prog_link) {
         fprintf(stderr, "Failed to attach eBPF Uprobe program, use XDP fallback...\n");
         
-        /* Check if can create raw sockets for XDP */
-        if (check_capability(CAP_NET_RAW) <= 0) {
-            WARN("LEMON does not have CAP_NET_RAW to create raw sockets for XDP");
-        }
-        
         /* Get loopback interface index by name "lo" (usually 1) */
         int ifindex = if_nametoindex(loopback_interface);
         if (ifindex <= 0) {
@@ -245,7 +222,7 @@ int load_ebpf_mem_progs() {
         }
         
         /* Create socket for sending trigger packets */
-        if ((ret = init_raw_socket(ifindex))) {
+        if ((ret = init_udp_socket())) {
             return ret;
         }
     }
@@ -266,17 +243,17 @@ void cleanup_mem_ebpf() {
         if(read_mem_result) munmap(read_mem_result, sizeof(struct read_mem_result));
         mem_ebpf__destroy(mem_ebpf_skel);
     }
-    
+
     /* Destroy bpf_link if it exists*/
     if (bpf_prog_link) {
         bpf_link__destroy(bpf_prog_link);
         bpf_prog_link = NULL;
     }
 
-    /* Close raw socket if it's open */
-    if (raw_sockfd) {
-        close(raw_sockfd);
-        raw_sockfd = -1;
+    /* Close UDP socket if it's open */
+    if (udp_sockfd > 0) {
+        close(udp_sockfd);
+        udp_sockfd = -1;
     }
 }
 
@@ -298,59 +275,39 @@ uintptr_t phys_to_virt(const uintptr_t phy_addr) {
 }
 
 /*
- * send_xdp_trigger_packet() - Send Ethernet frame to trigger XDP program
+ * send_udp_trigger_packet() - Send UDP packets to trigger XDP program
  * @addr: Virtual address of the memory region to read
  * @size: Size of the memory region to read
- * 
- * Constructs and sends an Ethernet frame with the memory read arguments as payload
- * to the loopback interface triggering the XDP program to perform the read.
- * Uses a minimal Ethernet frame with broadcast destination.
- * Returns 0 on success, negative errno value on failure.
  */
-static int send_xdp_trigger_packet(const uintptr_t addr, const size_t size) {
-    int ifindex;
+static int send_udp_trigger_packet(const uintptr_t addr, const size_t size) {
     ssize_t sent_bytes;
-    struct trigger_frame frame;
-    struct sockaddr_ll dest_addr;
-    
-     ifindex = if_nametoindex(loopback_interface);
-    
-    /* Initialize frame structure */
-    memset(&frame, 0, sizeof(frame));
-    
-    /* Setup Ethernet header, and use broadcast address for simplicity */
-    memset(frame.eth_header.h_dest, 0xFF, ETH_ALEN);    /* Broadcast destination */
-    memset(frame.eth_header.h_source, 0x00, ETH_ALEN);
-    frame.eth_header.h_proto = htons(0x0800);
-    
+    struct sockaddr_in dest_addr;
+    struct read_mem_args args;
+
     /* Setup memory read arguments in payload */
-    frame.args.addr = addr;
-    frame.args.size = size;
-    
-    /* Setup destination address */
+    args.addr = addr;
+    args.size = size;
+
+    /* Setup destination address (loopback) */
     memset(&dest_addr, 0, sizeof(dest_addr));
-    dest_addr.sll_family = AF_PACKET;
-    dest_addr.sll_ifindex = ifindex;
-    dest_addr.sll_protocol = htons(ETH_P_ALL);
-    dest_addr.sll_halen = ETH_ALEN;
-    memset(dest_addr.sll_addr, 0xFF, ETH_ALEN);  /* Broadcast destination */
-    
-    /* Send the frame */
-    sent_bytes = sendto(raw_sockfd, &frame, sizeof(frame), 0,
-                       (struct sockaddr *)&dest_addr, sizeof(dest_addr));
-    
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    dest_addr.sin_port = htons(9999);
+
+    /* Send the UDP packet */
+    sent_bytes = sendto(udp_sockfd, &args, sizeof(args), 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+
     if (sent_bytes < 0) {
-        perror("Failed to send XDP trigger packet");
+        perror("Failed to send UDP trigger packet");
         return -errno;
     }
-    
-    /* For raw packets, partial send should not happen */
-    if (sent_bytes != sizeof(frame)) {
-        fprintf(stderr, "Incomplete packet send: %zd of %zu bytes\n", 
-                sent_bytes, sizeof(frame));
+
+    /* Check partial send*/
+    if (sent_bytes != sizeof(args)) {
+        fprintf(stderr, "Incomplete packet send: %zd of %zu bytes\n", sent_bytes, sizeof(args));
         return -EIO;
     }
-    
+
     return 0;
 }
 
@@ -365,11 +322,11 @@ static int send_xdp_trigger_packet(const uintptr_t addr, const size_t size) {
  */
 int __attribute__((noinline, optnone)) read_kernel_memory(const uintptr_t addr, const size_t size, __u8 **restrict data) {
     /* If the Uprobe support is not active in kernel, use XDP to read the memory*/
-    if(raw_sockfd > 0) {
+    if(udp_sockfd > 0) {
         int ret;
-        
-        /* Send XDP trigger packet */
-        ret = send_xdp_trigger_packet(addr, size);
+
+        /* Send UDP trigger packet for XDP*/
+        ret = send_udp_trigger_packet(addr, size);
         if (ret < 0) {
             read_mem_result->ret_code = ret;
             return ret;
