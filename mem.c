@@ -218,7 +218,8 @@ int load_ebpf_mem_progs() {
         /* Attach XDP program to the interface */
         bpf_prog_link = bpf_program__attach_xdp(mem_ebpf_skel->progs.read_kernel_memory_xdp, ifindex);
         if (!bpf_prog_link) {
-            fprintf(stderr, "Failed to attach XDP program to interface %s (index: %d)\n", loopback_interface, ifindex);
+            fprintf(stderr, "Failed to attach XDP program to interface %s...\n", loopback_interface);
+            return -errno;
         }
         
         /* Create socket for sending trigger packets */
