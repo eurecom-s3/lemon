@@ -1,7 +1,7 @@
 name: Build
 
 on:
-  push
+  [push, pull_request]
 
 jobs:
   build:
@@ -36,6 +36,7 @@ jobs:
           name: lemon.aarch64
           path: "lemon.aarch64"
       continue-on-error: true
+
   run:
     needs: build
     runs-on: ${{ matrix.os }}
