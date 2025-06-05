@@ -30,8 +30,7 @@ static int dump_region(const uintptr_t region_start, const uintptr_t region_end,
     unsigned char *read_data = NULL;
 
     chunk_start = region_start;
-    while (chunk_start <= region_end)
-    {
+    while (chunk_start <= region_end) {
         /* Read memory region in chunks of maximum granule bytes */
         chunk_end = (region_end - chunk_start + 1 > granule) ? chunk_start + granule - 1 : region_end;
         chunk_size = chunk_end - chunk_start + 1;

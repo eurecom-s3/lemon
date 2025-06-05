@@ -20,7 +20,6 @@ struct net_args {
  *
  * Returns 0 on success.
  */
-
 int write_on_socket(void *restrict args, const void *restrict data, const unsigned long size) {
     unsigned long r;
     unsigned long total;
@@ -48,7 +47,6 @@ int write_on_socket(void *restrict args, const void *restrict data, const unsign
  *
  * On success, it returns 0. On failure, a negative value or errno is returned.
  */
-
 int dump_on_net(const struct options *restrict opts, const struct ram_regions *restrict ram_regions) {
     int sockfd;
     struct sockaddr_in dest_addr;
@@ -86,5 +84,3 @@ int dump_on_net(const struct options *restrict opts, const struct ram_regions *r
     
     return ret;
 }
-
-    

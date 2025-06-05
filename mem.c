@@ -1,8 +1,10 @@
+#include <arpa/inet.h>
+#include <bpf/bpf.h>
+#include <net/if.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
-#include <unistd.h>
 #include <sys/capability.h>
-#include <bpf/bpf.h>
+#include <unistd.h>
 
 #include "lemon.h"
 #include "ebpf/mem.ebpf.skel.h"
@@ -28,11 +30,15 @@ struct resource {
 
 extern int check_capability(const cap_value_t cap);
 
-/* eBPF memory read program skeleton and fd of the XDP program */
+/* eBPF memory read program skeleton */
 struct mem_ebpf *mem_ebpf_skel;
-int read_kernel_memory_xdp_fd;
 
-/* File descriptor and mmap() pointer associated to the eBPF map.*/
+/* XDP and UDP trigger resources */
+int udp_sockfd = -1;
+const char *loopback_interface = "lo";
+struct bpf_link *bpf_prog_link = NULL;
+
+/* File descriptor and mmap() pointer associated to the eBPF map */
 int read_mem_result_fd;
 struct read_mem_result *read_mem_result;
 
@@ -43,7 +49,7 @@ struct read_mem_result *read_mem_result;
     static int64_t v2p_offset;
 #endif
 
-/*Address of root of struct resources list (physical memory regions list) */
+/* Address of root of struct resources list (physical memory regions list) */
 static uintptr_t iomem_resource;
 
 #if defined(__TARGET_ARCH_arm64)
@@ -133,6 +139,31 @@ static int init_mmap() {
 }
 
 /*
+ * init_udp_socket() - Create and configure UDP socket for sending trigger packets
+ *
+ * Creates a UDP socket for sending XDP trigger packets to the loopback interface.
+ * Returns 0 on success, negative errno value on failure.
+ */
+static int init_udp_socket() {
+    struct sockaddr_in local_addr;
+
+    /* Create UDP socket */
+    udp_sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (udp_sockfd < 0) {
+        perror("Failed to create UDP socket for XDP trigger");
+        return -errno;
+    }
+
+    /* Setup local address structure for binding*/
+    memset(&local_addr, 0, sizeof(local_addr));
+    local_addr.sin_family = AF_INET;
+    local_addr.sin_addr.s_addr = INADDR_ANY;
+    local_addr.sin_port = 0;
+
+    return 0;
+}
+
+/*
  * load_ebpf_mem_progs() - Initialize and attach eBPF programs for memory access
  *
  * Opens, loads, attaches the eBPF programs, and sets up shared memory. 
@@ -150,7 +181,7 @@ int load_ebpf_mem_progs() {
     mem_ebpf_skel = mem_ebpf__open();
     if(!mem_ebpf_skel) {
         perror("Failed to open BPF skeleton");
-        return errno;
+        return -errno;
     }
 
     /* ARM64 phys to virt translation requires two values, one of the two (CONFIG_ARM64_VA_BITS)
@@ -169,21 +200,34 @@ int load_ebpf_mem_progs() {
     /* Load the BPF objectes */
     if (mem_ebpf__load(mem_ebpf_skel)) {
         perror("Failed to load BPF object");
-        return errno;
+        return -errno;
     }
 
     /* Attach the uprobe to the 'read_kernel_memory' function in the current executable */
-    if (!bpf_program__attach(mem_ebpf_skel->progs.read_kernel_memory_uprobe)) {
-        fprintf(stderr, "Failed to attach eBPF Uprobe program, use fallback one...\n");
-
-        read_kernel_memory_xdp_fd = bpf_program__fd(mem_ebpf_skel->progs.read_kernel_memory_xdp);
-        if(read_kernel_memory_xdp_fd < 0) {
-            fprintf(stderr, "Fail to get fd of eBPF callback program\n");
-            return read_kernel_memory_xdp_fd;
+    bpf_prog_link = bpf_program__attach(mem_ebpf_skel->progs.read_kernel_memory_uprobe);
+    if (!bpf_prog_link) {
+        fprintf(stderr, "Failed to attach eBPF Uprobe program, use XDP fallback...\n");
+        
+        /* Get loopback interface index by name "lo" (usually 1) */
+        int ifindex = if_nametoindex(loopback_interface);
+        if (ifindex <= 0) {
+            perror("Failed to get interface index");
+            return -errno;
+        }
+        
+        /* Attach XDP program to the interface */
+        bpf_prog_link = bpf_program__attach_xdp(mem_ebpf_skel->progs.read_kernel_memory_xdp, ifindex);
+        if (!bpf_prog_link) {
+            fprintf(stderr, "Failed to attach XDP program to interface %s...\n", loopback_interface);
+            return -errno;
+        }
+        
+        /* Create socket for sending trigger packets */
+        if ((ret = init_udp_socket())) {
+            return ret;
         }
     }
-    else { read_kernel_memory_xdp_fd = 0; }
-
+    
     /* Create the mmap */
     if((ret = init_mmap())) {
         return ret;
@@ -200,6 +244,18 @@ void cleanup_mem_ebpf() {
         if(read_mem_result) munmap(read_mem_result, sizeof(struct read_mem_result));
         mem_ebpf__destroy(mem_ebpf_skel);
     }
+
+    /* Destroy bpf_link if it exists*/
+    if (bpf_prog_link) {
+        bpf_link__destroy(bpf_prog_link);
+        bpf_prog_link = NULL;
+    }
+
+    /* Close UDP socket if it's open */
+    if (udp_sockfd > 0) {
+        close(udp_sockfd);
+        udp_sockfd = -1;
+    }
 }
 
 /*
@@ -209,7 +265,6 @@ void cleanup_mem_ebpf() {
  * Performs architecture-specific translation using kernel direct mapping.
  * Currently supports x86_64 and ARM64 only.
  */
-
 uintptr_t phys_to_virt(const uintptr_t phy_addr) {
     #ifdef __TARGET_ARCH_x86
         return phy_addr + v2p_offset;
@@ -221,29 +276,59 @@ uintptr_t phys_to_virt(const uintptr_t phy_addr) {
 }
 
 /*
- * read_kernel_memory() - Trigger eBPF UProbe to read kernel virtual memory
+ * send_udp_trigger_packet() - Send UDP packets to trigger XDP program
+ * @addr: Virtual address of the memory region to read
+ * @size: Size of the memory region to read
+ */
+static int send_udp_trigger_packet(const uintptr_t addr, const size_t size) {
+    ssize_t sent_bytes;
+    struct sockaddr_in dest_addr;
+    struct read_mem_args args;
+
+    /* Setup memory read arguments in payload */
+    args.addr = addr;
+    args.size = size;
+
+    /* Setup destination address (loopback) */
+    memset(&dest_addr, 0, sizeof(dest_addr));
+    dest_addr.sin_family = AF_INET;
+    dest_addr.sin_addr.s_addr = inet_addr("127.0.0.1");
+    dest_addr.sin_port = htons(9999);
+
+    /* Send the UDP packet */
+    sent_bytes = sendto(udp_sockfd, &args, sizeof(args), 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+
+    if (sent_bytes < 0) {
+        perror("Failed to send UDP trigger packet");
+        return -errno;
+    }
+
+    /* Check partial send*/
+    if (sent_bytes != sizeof(args)) {
+        fprintf(stderr, "Incomplete packet send: %zd of %zu bytes\n", sent_bytes, sizeof(args));
+        return -EIO;
+    }
+
+    return 0;
+}
+
+/*
+ * read_kernel_memory() - Trigger eBPF UProbe or XDP to read kernel virtual memory
  * @addr: Virtual address of the memory region to read
  * @size: Size of the memory region to read
  * @data: Pointer to store the output data
  *
- * This function triggers an eBPF UProbe to read the specified memory region in kernel space.
+ * This function triggers an eBPF UProbe or XDP to read the specified memory region in kernel space.
  * The function is marked with `noinline` and `optnone` to ensure the code is not optimized or inlined by the compiler.
  */
-int __attribute__((noinline, optnone)) read_kernel_memory(const uintptr_t addr, const size_t size, __u8 **restrict data)
-{
-    /* If the Uprobe support is not active in kernel read the memory using the eBPF test program syscall trick */
-    if(read_kernel_memory_xdp_fd) {
-        struct read_mem_args args = {addr, size};
-        struct bpf_test_run_opts opts = {
-        .sz = sizeof(struct bpf_test_run_opts),
-        .data_in = &args,
-        .data_size_in = sizeof(struct read_mem_args),
-        };
-
-        /* Call the eBPF XDP program */
+int __attribute__((noinline, optnone)) read_kernel_memory(const uintptr_t addr, const size_t size, __u8 **restrict data) {
+    /* If the Uprobe support is not active in kernel, use XDP to read the memory*/
+    if(udp_sockfd > 0) {
         int ret;
-        if((ret = bpf_prog_test_run_opts(read_kernel_memory_xdp_fd, &opts)) < 0) 
-        {
+
+        /* Send UDP trigger packet for XDP*/
+        ret = send_udp_trigger_packet(addr, size);
+        if (ret < 0) {
             read_mem_result->ret_code = ret;
             return ret;
         }
@@ -262,12 +347,11 @@ int __attribute__((noinline, optnone)) read_kernel_memory(const uintptr_t addr, 
  * Scans the line for the symbol name and extracts its address using sscanf.
  * Returns 1 on success, 0 on not looked for element or a negative error code from read_kernel_memory().
  */
-
 static int inline parse_kallsyms_line(const char *restrict line, const char *restrict symbol, uintptr_t *restrict current_symb_addr) {
     char current_symb_name[256];
 
     /* Read the address and check if the it is the symbol that we look for */
-    if ((sscanf(line, "%lx %*c %255s\n",current_symb_addr, current_symb_name) != 2) || strncmp(current_symb_name, symbol, strlen(symbol)))
+    if ((sscanf(line, "%lx %*c %255s\n", current_symb_addr, current_symb_name) != 2) || strncmp(current_symb_name, symbol, strlen(symbol)))
         return 0;
 
     /* Check that address is not 0 */
@@ -279,10 +363,10 @@ static int inline parse_kallsyms_line(const char *restrict line, const char *res
  *
  * Opens /proc/kallsyms, searches for the appropriate symbol (e.g., "page_offset_base" or 
  * "memstart_addr" and "iomem_resource") based on architecture, and retrieves the physical-to-virtual address 
- * translation offset and the pointer to the tree of physical memory regions. Returns 0 on success, or an error code on failure.
+ * translation offset and the pointer to the tree of physical memory regions. 
+ * Returns 0 on success, or an error code on failure.
  */
-static int parse_kallsyms()
-{
+static int parse_kallsyms() {
     FILE *fp;
     char line[256];
     __u8 *data = NULL;
@@ -362,11 +446,10 @@ static int parse_kallsyms()
  *
  * Opens /proc/iomem, searches for "System RAM" regions, and populates the provided
  * ram_regions struct with the start and end addresses of each region. The function
- * reallocates memory as needed to accommodate additional regions. Returns 0 on success,
- * or an error code on failure.
+ * reallocates memory as needed to accommodate additional regions. 
+ * Returns 0 on success, or an error code on failure.
  */
-static int get_iomem_regions_user(struct ram_regions *restrict ram_regions)
-{
+static int get_iomem_regions_user(struct ram_regions *restrict ram_regions) {
     FILE *fp;
     char line[256];
     int slot_availables;
@@ -439,11 +522,10 @@ static int get_iomem_regions_user(struct ram_regions *restrict ram_regions)
  *
  * Read struct resources from kernel, and populates the provided
  * ram_regions struct with the start and end addresses of each region. The function
- * reallocates memory as needed to accommodate additional regions. Returns 0 on success,
- * or an error code on failure.
+ * reallocates memory as needed to accommodate additional regions. 
+ * Returns 0 on success, or an error code on failure.
  */
-static int get_iomem_regions_kernel(struct ram_regions *restrict ram_regions)
-{
+static int get_iomem_regions_kernel(struct ram_regions *restrict ram_regions) {
     int slot_availables;
     __u8 *data = NULL;
     struct resource *res, *next_res;
@@ -464,7 +546,7 @@ static int get_iomem_regions_kernel(struct ram_regions *restrict ram_regions)
      * Is it possible to have "System RAM" regions inside non System RAM regions? I don't think so. 
      */
 
-    /* Obrain the address child of the root struct */
+    /* Obtain the address child of the root struct */
     if((err = read_kernel_memory(iomem_resource, sizeof(struct resource), &data))) {
         fprintf(stderr, "Error reading root struct resource");
         return err;

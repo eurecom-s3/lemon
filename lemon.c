@@ -119,8 +119,7 @@ static int check_kernel_version() {
     return (major > MIN_MAJOR_LINUX) || ((major == MIN_MAJOR_LINUX) && (minor >= MIN_MINOR_LINUX));
 }
 
-int main(int argc, char **argv)
-{
+int main(int argc, char **argv) {
     struct ram_regions ram_regions;
     struct options opts = {0};
     struct argp argp = {options, parse_opt, "", doc};
