@@ -2,20 +2,20 @@
 
 LEMON is a Linux and Android memory dump tool that utilizes eBPF to capture the entire physical memory of a system and save it in LiME format, compatible with forensic tools such as Volatility 3.
 
-LEMON is available as a precompiled static binary for x64 and ARM64, leveraging a CO-RE (Compile Once, Run Everywhere) eBPF program. This allows analysts to dump system memory without compiling anything on the target machine, checking for specific compatibility with installed libraries and kernel versions, and without requiring kernel headers. It is particularly useful in scenarios where loading kernel modules is not possible (e.g., due to Secure Boot) or when `{/proc, /dev}/kcore` is unavailable.
+LEMON is available as a precompiled static binary for x64 and ARM64, leveraging a CO-RE (Compile Once, Run Everywhere) eBPF program. This allows analysts to dump system memory without compiling anything on the target machine, checking for specific compatibility with installed libraries and kernel versions, and without requiring kernel headers. It is particularly useful in scenarios where loading kernel modules is not possible (e.g., due to Secure Boot) or when `{/proc, /dev}/kcore` is unavailable. If CO-RE is not available on the target machine a universal kernel-independent no CO-RE version of lemon can be run on it.
 
 ## Usage
 
 Copy the `lemon` binary to the target machine and initiate a memory dump on disk with:
 
 ```sh
-./lemon.ARCH -d memory_on_disk.dump
+./lemon.MODE.ARCH -d memory_on_disk.dump
 ```
 
 For a network dump instead use:
 
 ```sh
-./lemon.ARCH -n TARGET_IP -p TARGET_PORT
+./lemon.MODE.ARCH -n TARGET_IP -p TARGET_PORT
 ```
 while on the target machine
 ```sh
@@ -23,10 +23,11 @@ nc -l -p TARGET_PORT >  memory_by_net.dump
 ```
 
 This generates a `memory.dump` file in LiME format, containing all physical memory pages. Since running eBPF programs typically requires root privileges, LEMON must be executed as `root` or with an appropriate `sudo` configuration.
+Sometimes LEMON returns reading error on a 2MB block of pages: it is normal and due to KFENCE security infrastructure of the kernel.  
 
 ## Build
 
-Precompiled static binaries are available in this repository (check the Github actions tab). Analysts can also compile LEMON themselves, either dynamically or statically. The dynamic version requires the presence of `libbpf`, `libz`, `libelf`, and `libzstd` on the target machine, whereas the static version has no external dependencies. Note that the build machine **MUST** have the same CPU architecture as the target.
+Precompiled static binaries are available in this repository (check the Github actions tab) or in the release section. Analysts can also compile LEMON themselves, either dynamically or statically. The dynamic version requires the presence of `libbpf`, `libz`, `libelf`, `libzstd` and `libcap` on the target machine, whereas the static version has no external dependencies. Note that the build machine **MUST** have the same CPU architecture as the target.
 
 ### Dependencies
 
@@ -46,23 +47,15 @@ Other distributions provide equivalent packages, which at minimum allow compilin
    git clone git@github.com:eurecom-s3/lemon.git && cd lemon
    ```
 
-2. **Generate a valid **`vmlinux.h`** file (only for CO-RE builds):**
+2. **Compile:**
 
-   Copy a valid `vmlinux.h` file into `lemon/` or generate one with:
-
-   ```sh
-   make vmlinux
-   ```
-
-3. **Compile:**
-
-   - Dynamic binary (set CORE=0 for non CO-RE binaries):
+   - Dynamic binary (MODE accepts: core, nocore (for using no CO-RE version based on kernel headers) and nocoreuni (for no CO-RE version using the universal header included in LEMON)):
      ```sh
-     make CORE=1
+     make MODE=core
      ```
    - Static binary:
      ```sh
-     make CORE=1 static
+     make MODE=core static
      ```
 
 ## Limitations
@@ -72,7 +65,7 @@ Other distributions provide equivalent packages, which at minimum allow compilin
 
 ## TODO
 
-- [X] Support non CO-RE kernels ([this library](https://github.com/eunomia-bpf/bpf-compatible) might help)
+- [X] Support non CO-RE kernels
 - [X] Insert checks on kernel versions and ```CONFIG_``` kernel options to extend support
 - [X] Implement network dump (TCP)
 - [X] Implement dump with reduced granule if page fail to be read
