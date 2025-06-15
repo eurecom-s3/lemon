@@ -21,20 +21,38 @@ jobs:
     
     - name: Compile with Make
       run: |
-        make CORE=1 static
+        make MODE=core STATIC=1
     
-    - name: Upload x64 binary
+    - name: Upload x64 CORE binary
       uses: actions/upload-artifact@v4
       with:
-          name: lemon.x86_64
-          path: "lemon.x86_64"
+          name: lemon.core.x86_64
+          path: "lemon.core.x86_64"
       continue-on-error: true
 
-    - name: Upload ARM64 binary
+    - name: Upload ARM64 CORE binary
       uses: actions/upload-artifact@v4
       with:
-          name: lemon.aarch64
-          path: "lemon.aarch64"
+          name: lemon.core.aarch64
+          path: "lemon.core.aarch64"
+      continue-on-error: true
+
+    - name: Compile with Make
+      run: |
+        make MODE=nocoreuni STATIC=1
+    
+    - name: Upload x64 NO-CORE universal binary
+      uses: actions/upload-artifact@v4
+      with:
+          name: lemon.nocoreuni.x86_64
+          path: "lemon.nocoreuni.x86_64"
+      continue-on-error: true
+
+    - name: Upload ARM64 NO-CORE universal binary
+      uses: actions/upload-artifact@v4
+      with:
+          name: lemon.nocoreuni.aarch64
+          path: "lemon.nocoreuni.aarch64"
       continue-on-error: true
 
   run:
@@ -48,6 +66,9 @@ jobs:
         uses: actions/download-artifact@v4
       - name: Run dump to disk
         run: |
-          sudo chmod +x ./lemon.$(uname -m)/lemon.$(uname -m)
-          sudo ./lemon.$(uname -m)/lemon.$(uname -m) -d /dev/null
-# TODO build and run on NO CORE
+          sudo chmod +x ./lemon.core.$(uname -m)/lemon.core.$(uname -m)
+          sudo ./lemon.core.$(uname -m)/lemon.core.$(uname -m) -d /dev/null
+      - name: Run dump to disk
+        run: |
+          sudo chmod +x ./lemon.nocoreuni.$(uname -m)/lemon.nocoreuni.$(uname -m)
+          sudo ./lemon.nocoreuni.$(uname -m)/lemon.nocoreuni.$(uname -m) -d /dev/null

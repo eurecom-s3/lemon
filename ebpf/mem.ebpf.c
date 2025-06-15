@@ -9,13 +9,19 @@
     #ifndef IPPROTO_UDP
         #define IPPROTO_UDP 17
     #endif
-#else
-    #include <asm/ptrace.h>
+
+#elif NOCORE
     #include <linux/bpf.h>
+    #include <asm/ptrace.h>
     #include <linux/if_ether.h>
     #include <linux/in.h>
     #include <linux/ip.h>
     #include <linux/udp.h>
+
+#elif NOCOREUNI
+    #include "../nocore_universal.h"
+    #include <bpf/bpf_tracing.h>
+    
 #endif
 
 #include <bpf/bpf_helpers.h>
