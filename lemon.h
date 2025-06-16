@@ -9,7 +9,6 @@
 
 #define HUGE_PAGE_SIZE          2 * 1024 * 1024         /* Same for huge pages */
 #define DEFAULT_PORT            2304                    /* Default port used for networt dump */
-#define UDP_MAX_PAYLOAD         1024                    /* Maximum payload for UDP socket */
 
 #define WARN(msg, ...) fprintf(stderr, "WARNING: " msg "\n", ##__VA_ARGS__)
 
@@ -24,7 +23,6 @@ struct options {
     /* Network options */
     unsigned long address;
     unsigned short port;
-    bool udp;
 
     /* Options */
     bool realtime;

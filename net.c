@@ -8,7 +8,6 @@ extern int dump(const struct options *restrict opts, const struct ram_regions *r
 
 /* Arguments passed to write_on_socket() */
 struct net_args {
-    bool udp;
     int sockfd;
 };
 
@@ -54,7 +53,7 @@ int dump_on_net(const struct options *restrict opts, const struct ram_regions *r
     int ret;
 
     /* Create socket */
-    sockfd = socket(AF_INET, opts->udp ? SOCK_DGRAM : SOCK_STREAM, 0);
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) {
         perror("Fail to open network socket");
         return errno;
@@ -73,7 +72,6 @@ int dump_on_net(const struct options *restrict opts, const struct ram_regions *r
 
     /* Setup arguments for write_on_socket */
     net_args.sockfd = sockfd;
-    net_args.udp = opts->udp;
 
     /* Dump! */
     ret = dump(opts, ram_regions, write_on_socket, (void *)&net_args);

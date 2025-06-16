@@ -73,7 +73,6 @@ Other distributions provide equivalent packages, which at minimum allow compilin
 - [ ] Support other CPU architectures (x32, ARM32, MIPS, PowerPC, POWER, RISC-V)
 - [ ] Use of `_stext` in x64 to bypass missing `CONFIG_KALLSYMS_ALL`
 - [ ] Bruteforce scanning (?) for page containing same data of  `_stext` page in ARM64 to bypass missing `CONFIG_KALLSYMS_ALL`
-- [ ] Implement network dump (UDP)
 
 ## Notes
 

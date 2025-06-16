@@ -24,7 +24,6 @@ static const struct argp_option options[] = {
     {"disk",      'd', "PATH",      0, "Dump on disk", 0},
     {"network",   'n', "ADDRESS",   0, "Dump through the network", 1},
     {"port",      'p', "PORT",      0, "Specify port number", 1},
-    {"udp",       'u', 0,           0, "Use UDP instead of TCP", 1},
     {"realtime",  'r', 0,           0, "Use realtime priority", 2},
     {"fatal",     'f', 0,           0, "Interrupt the dump in case of memory read error", 2},
     {"raw",       'w', 0,           0, "Produce a RAW dump instead of a LiME one", 2},
@@ -71,10 +70,6 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
         case 'f':
             opts->fatal = true;
             break;
-        case 'u':
-            opts->udp = true;
-            fprintf(stderr, "To be implemented...\n");
-            exit(EXIT_FAILURE);
         case 'w':
             opts->raw = true;
             break;
