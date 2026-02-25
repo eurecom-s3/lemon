@@ -51,7 +51,7 @@ Other distributions provide equivalent packages, which at minimum allow compilin
      ```
    - Static binary:
      ```sh
-     make MODE=core static
+     make MODE=core STATIC=1
      ```
 
 ## Limitations
