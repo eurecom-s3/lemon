@@ -1,4 +1,4 @@
-name: Build
+name: Build and run
 
 on:
   [push, pull_request]
@@ -19,7 +19,15 @@ jobs:
         sudo apt update
         sudo apt install -y make llvm libbpf-dev libcap-dev linux-tools-generic
     
+    # FIXME: With newer Ubuntu runners this should become useless hopefully
+    - name: Find bpftool
+      id: find-bpftool
+      run: |
+        echo "bpftool=$(find -L /usr/lib/linux-tools/ -maxdepth 2 -mindepth 2 -name bpftool | head -n1)" >> $GITHUB_OUTPUT
+
     - name: Compile with Make
+      env:
+        BPFTOOL: ${{ steps.find-bpftool.outputs.bpftool }}
       run: |
         make MODE=core STATIC=1
     
@@ -38,9 +46,10 @@ jobs:
       continue-on-error: true
 
     - name: Compile with Make
+      env:
+        BPFTOOL: ${{ steps.find-bpftool.outputs.bpftool }}
       run: |
         make MODE=nocoreuni STATIC=1
-    
     - name: Upload x64 NO-CORE universal binary
       uses: actions/upload-artifact@v4
       with:

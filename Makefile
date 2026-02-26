@@ -1,6 +1,7 @@
 # Optional build flags (can be overridden via command line)
 STATIC ?=
 MODE ?= core
+BPFTOOL ?= bpftool
 
 # Validate MODE value
 VALID_MODES := core nocore nocoreuni
@@ -10,7 +11,6 @@ endif
 
 # System and architecture detection
 ARCH := $(shell uname -m)
-BPFTOOL := bpftool
 
 # Detect architecture for eBPF
 ifeq ($(ARCH), x86_64)
