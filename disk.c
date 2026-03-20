@@ -18,7 +18,7 @@ extern int check_capability(const cap_value_t cap);
  * @size: Number of bytes to write
  */
 static int write_on_disk(void *restrict args, const void *restrict data, const unsigned long size) {
-    unsigned long r = 0;
+    long r = 0;
     unsigned long total = 0;
     void *dummy_buffer = NULL;
 

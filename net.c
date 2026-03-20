@@ -22,7 +22,7 @@ struct net_args {
  * Returns 0 on success.
  */
 int write_on_socket(void *restrict args, const void *restrict data, const unsigned long size) {
-    unsigned long r;
+    long r;
     unsigned long total;
     struct net_args *net_args = (struct net_args *)args;
     void *dummy_buffer = NULL;

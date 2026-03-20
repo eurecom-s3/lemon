@@ -51,7 +51,7 @@ static int dump_region(const uintptr_t region_start, const uintptr_t region_end,
         }
 
         /* Save the chunk */
-        if ((ret = write_f(args, read_data, chunk_size)) < 0) {
+        if ((ret = write_f(args, read_data, chunk_size)) > 0) {
             fprintf(stderr, "Error saving dump data\n");
             return ret;
         }
