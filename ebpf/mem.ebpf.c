@@ -116,7 +116,7 @@ static int inline read_memory(__u64 address, const __u64 dump_size) {
  * Uprobe handler for extracting kernel memory from userspace-triggered instrumentation.
  * Retrieves the target address and dump size from the probed function’s arguments,
  */
-SEC("uprobe//proc/self/exe:read_kernel_memory")
+SEC("uprobe//proc/self/exe:_read_kernel_memory")
 int read_kernel_memory_uprobe(struct pt_regs *ctx)
 {
     /* Extract the first two arguments of the function */

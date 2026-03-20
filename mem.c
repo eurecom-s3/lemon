@@ -313,7 +313,22 @@ static int send_udp_trigger_packet(const uintptr_t addr, const size_t size) {
 }
 
 /*
- * read_kernel_memory() - Trigger eBPF UProbe or XDP to read kernel virtual memory
+ * read_kernel_memory() - Read kernel virtual memory
+ * @addr: Virtual address of the memory region to read
+ * @size: Size of the memory region to read
+ * @data: Pointer to store the output data
+ *
+ */
+ int read_kernel_memory(const uintptr_t addr, const size_t size, __u8 **restrict data) {
+    
+    /* Default error code to catch failed attach of array map by the kernel */
+    read_mem_result->ret_code = -EINVAL;
+
+    return _read_kernel_memory(addr, size, data);
+ }
+ 
+/*
+ * _read_kernel_memory() - Trigger eBPF UProbe or XDP to read kernel virtual memory
  * @addr: Virtual address of the memory region to read
  * @size: Size of the memory region to read
  * @data: Pointer to store the output data
@@ -321,7 +336,7 @@ static int send_udp_trigger_packet(const uintptr_t addr, const size_t size) {
  * This function triggers an eBPF UProbe or XDP to read the specified memory region in kernel space.
  * The function is marked with `noinline` and `optnone` to ensure the code is not optimized or inlined by the compiler.
  */
-int __attribute__((noinline, optnone)) read_kernel_memory(const uintptr_t addr, const size_t size, __u8 **restrict data) {
+static int __attribute__((noinline, optnone)) _read_kernel_memory(const uintptr_t addr, const size_t size, __u8 **restrict data) {
     /* If the Uprobe support is not active in kernel, use XDP to read the memory*/
     if(udp_sockfd > 0) {
         int ret;
