@@ -28,7 +28,7 @@ int write_on_socket(void *restrict args, const void *restrict data, const unsign
     void *dummy_buffer = NULL;
 
     /* If data is NULL or size is greater than 0, allocate a dummy buffer to be written */
-    if(data == NULL || size > 0) {
+    if(data == NULL && size > 0) {
         dummy_buffer = malloc(size);
         if(dummy_buffer == NULL) {
             perror("Fail to allocate dummy buffer");
@@ -92,7 +92,7 @@ int dump_on_net(const struct options *restrict opts, const struct ram_regions *r
     /* Dump! */
     ret = dump(opts, ram_regions, write_on_socket, (void *)&net_args);
 
-    if(sockfd) {
+    if(sockfd >= 0) {
         if(close(sockfd)) { perror("Fail to close the connection"); ret = errno; }
     }
     
