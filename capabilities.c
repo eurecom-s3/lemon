@@ -47,7 +47,7 @@ int check_capability(const cap_value_t cap) {
     }
 
     cleanup:
-        if((ret = cap_free(caps))) {
+        if((cap_free(caps))) {
             perror("Fail to free capabilities struct");
             return -errno;
         };
