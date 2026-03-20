@@ -311,21 +311,6 @@ static int send_udp_trigger_packet(const uintptr_t addr, const size_t size) {
 
     return 0;
 }
-
-/*
- * read_kernel_memory() - Read kernel virtual memory
- * @addr: Virtual address of the memory region to read
- * @size: Size of the memory region to read
- * @data: Pointer to store the output data
- *
- */
- int read_kernel_memory(const uintptr_t addr, const size_t size, __u8 **restrict data) {
-    
-    /* Default error code to catch failed attach of array map by the kernel */
-    read_mem_result->ret_code = -EINVAL;
-
-    return _read_kernel_memory(addr, size, data);
- }
  
 /*
  * _read_kernel_memory() - Trigger eBPF UProbe or XDP to read kernel virtual memory
@@ -352,6 +337,21 @@ static int __attribute__((noinline, optnone)) _read_kernel_memory(const uintptr_
     *data = read_mem_result->buf;
     return read_mem_result->ret_code;
 }
+
+/*
+ * read_kernel_memory() - Read kernel virtual memory
+ * @addr: Virtual address of the memory region to read
+ * @size: Size of the memory region to read
+ * @data: Pointer to store the output data
+ *
+ */
+ int read_kernel_memory(const uintptr_t addr, const size_t size, __u8 **restrict data) {
+    
+    /* Default error code to catch failed attach of array map by the kernel */
+    read_mem_result->ret_code = -EINVAL;
+
+    return _read_kernel_memory(addr, size, data);
+ }
 
 /*
  * parse_kallsyms_line() - Extracts the address of a specific kernel symbol from a text line

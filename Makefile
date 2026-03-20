@@ -66,7 +66,7 @@ $(BPF_OBJ): $(BPF_SRC)
 # Build the loader (compiled before eBPF program)
 $(LOADER_BIN): $(LOADER_SRCS)
 	$(CLANG) $(CFLAGS) $^ -o $@ $(LDFLAGS)
-	objcopy --strip-all --keep-symbol=read_kernel_memory $@ $@_strip
+	objcopy --strip-all --keep-symbol=_read_kernel_memory $@ $@_strip
 	mv $@_strip $@
 
 # Dump vmlinux BTF as C header (only if core mode is enabled)
