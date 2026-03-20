@@ -105,8 +105,7 @@ static int check_kernel_version() {
         perror("Fail to get Linux kernel version");
         return -errno;
     }
-    sscanf(buffer.release, "%d.%d.%d", &major, &minor, &patch);
-    if(errno) {
+    if((sscanf(buffer.release, "%d.%d.%d", &major, &minor, &patch) != 3) || errno) {
         perror("Fail to parse Linux version");
         return -errno;
     }
