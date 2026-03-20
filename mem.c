@@ -323,7 +323,7 @@ static int send_udp_trigger_packet(const uintptr_t addr, const size_t size) {
  */
 static int __attribute__((noinline, optnone)) _read_kernel_memory(const uintptr_t addr, const size_t size, __u8 **restrict data) {
     /* If the Uprobe support is not active in kernel, use XDP to read the memory*/
-    if(udp_sockfd > 0) {
+    if(udp_sockfd >= 0) {
         int ret;
 
         /* Send UDP trigger packet for XDP*/

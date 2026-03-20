@@ -105,6 +105,7 @@ static int check_kernel_version() {
         perror("Fail to get Linux kernel version");
         return -errno;
     }
+    errno = 0;
     if((sscanf(buffer.release, "%d.%d.%d", &major, &minor, &patch) != 3) || errno) {
         perror("Fail to parse Linux version");
         return -errno;
@@ -135,6 +136,7 @@ int main(int argc, char **argv) {
     }
 
     /* Check for eBPF support */
+    errno = 0;
     bpf_prog_load(BPF_PROG_TYPE_UNSPEC, NULL, NULL, NULL, 0, NULL);
 	if(errno == ENOSYS) {
         fprintf(stderr, "eBPF not supported by this kernel");
