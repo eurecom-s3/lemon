@@ -55,10 +55,12 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
             opts->network_mode = true;
             break;
         case 'p':
-            opts->port = atoi(arg);
-            if (opts->port <= 0 || opts->port > 65535) {
+            int port = atoi(arg);
+            
+            if (port <= 0 || port > 65535) {
                 argp_error(state, "Port must be between 1 and 65535");
             }
+            opts->port = (unsiegned int)port;
             break;
         case 'd':
             opts->disk_mode = true;
@@ -188,6 +190,7 @@ int main(int argc, char **argv) {
     cleanup:
         cleanup_mem_ebpf();
         join_cpu_stealers();
+        free(ram_regions.regions);
 
         /* Restore kptr_restrict if needed */
         if((ret = toggle_kptr())) return ret;
