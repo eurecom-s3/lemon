@@ -20,7 +20,7 @@ static int write_on_disk(void *restrict args, const void *restrict data, const u
     unsigned long total = 0;
     void *dummy_buffer = NULL;
 
-    /* If data is NULL or size is 0, allocate a dummy buffer to be written */
+    /* If data is NULL or size is greater than 0, allocate a dummy buffer to be written */
     if(data == NULL || size > 0) {
         dummy_buffer = malloc(size);
         if(dummy_buffer == NULL) {
