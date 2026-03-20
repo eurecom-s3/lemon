@@ -65,7 +65,7 @@ int dump_on_disk(const struct options *restrict opts, const struct ram_regions *
     }
 
     /* Open dump file in write mode */
-    fd = open(opts->path, O_CREAT | O_WRONLY, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+    fd = open(opts->path, O_CREAT | O_WRONLY | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
     if(fd < 0) {
         perror("Failed to open dump file for writing");
         return errno;
