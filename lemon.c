@@ -45,6 +45,7 @@ static const char doc[] = "Lemon - An eBPF Memory Dump Tool for x64 and ARM64 Li
 static error_t parse_opt(int key, char *arg, struct argp_state *state) {
     struct options *opts = state->input;
     struct in_addr addr;
+    int port;
     
     switch (key) {
         case 'n':
@@ -55,12 +56,12 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
             opts->network_mode = true;
             break;
         case 'p':
-            int port = atoi(arg);
+            port = atoi(arg);
             
             if (port <= 0 || port > 65535) {
                 argp_error(state, "Port must be between 1 and 65535");
             }
-            opts->port = (unsiegned int)port;
+            opts->port = (unsigned int)port;
             break;
         case 'd':
             opts->disk_mode = true;
