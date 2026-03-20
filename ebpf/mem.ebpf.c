@@ -164,6 +164,11 @@ int read_kernel_memory_xdp(struct xdp_md* ctx) {
         return XDP_DROP;
     }
 
+    /* Validate IP header length */
+    if (ip->ihl < 5) {
+        return XDP_DROP;
+    }
+
     /* Check if this is a UDP packet */
     if (ip->protocol != IPPROTO_UDP) {
         return XDP_PASS;
@@ -172,11 +177,6 @@ int read_kernel_memory_xdp(struct xdp_md* ctx) {
     /* Check if source/dest is loopback */
     if (ip->saddr != bpf_htonl(TRIGGER_PACKET_ADDR) ||  ip->daddr != bpf_htonl(TRIGGER_PACKET_ADDR)) {
         return XDP_PASS;
-    }
-
-    /* Validate IP header length */
-    if (ip->ihl < 5) {
-        return XDP_DROP;
     }
 
     /* Validate UDP header */
