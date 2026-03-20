@@ -7,7 +7,7 @@
 #define MIN_MAJOR_LINUX         5                       /* Minimium kernel version supported */
 #define MIN_MINOR_LINUX         5
 
-#define HUGE_PAGE_SIZE          2 * 1024 * 1024         /* Same for huge pages */
+#define HUGE_PAGE_SIZE          (2 * 1024 * 1024)         /* Same for huge pages */
 #define DEFAULT_PORT            2304                    /* Default port used for networt dump */
 
 #define WARN(msg, ...) fprintf(stderr, "WARNING: " msg "\n", ##__VA_ARGS__)
