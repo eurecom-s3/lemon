@@ -135,8 +135,8 @@ int main(int argc, char **argv) {
     }
 
     /* Check for eBPF support */
-    bpf_prog_load(BPF_PROG_TYPE_UNSPEC, NULL, NULL, NULL, 0, NULL);
-	if(errno == ENOSYS) {
+    ret = bpf_prog_load(BPF_PROG_TYPE_UNSPEC, NULL, NULL, NULL, 0, NULL);
+	if((ret < 0) || (errno == ENOSYS)) {
         fprintf(stderr, "eBPF not supported by this kernel");
         return EXIT_FAILURE;
     }
