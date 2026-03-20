@@ -23,7 +23,18 @@ int write_on_socket(void *restrict args, const void *restrict data, const unsign
     unsigned long r;
     unsigned long total;
     struct net_args *net_args = (struct net_args *)args;
+    void *dummy_buffer = NULL;
 
+    /* If data is NULL or size is 0, allocate a dummy buffer to be written */
+    if(data == NULL || size > 0) {
+        dummy_buffer = malloc(size);
+        if(dummy_buffer == NULL) {
+            perror("Fail to allocate dummy buffer");
+            return errno;
+        }
+        memset(dummy_buffer, 0x00, size);
+        data = dummy_buffer;
+    }
         total = r = 0;
         while(total < size) {
             r = write(net_args->sockfd, data + total, size - total);
@@ -35,6 +46,8 @@ int write_on_socket(void *restrict args, const void *restrict data, const unsign
             
             total += r;
         }
+
+    if(dummy_buffer) free(dummy_buffer);
 
     return 0;
 }

@@ -47,7 +47,7 @@ static int dump_region(const uintptr_t region_start, const uintptr_t region_end,
                 goto next_iter;
             }
 
-            else memset(read_data, 0x00, chunk_size); /* We are already at the minimum granule, replace with 0x00 */
+            else if(read_data) memset(read_data, 0x00, chunk_size); /* We are already at the minimum granule, replace with 0x00 */
         }
 
         /* Save the chunk */

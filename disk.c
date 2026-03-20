@@ -18,6 +18,18 @@ extern int check_capability(const cap_value_t cap);
 static int write_on_disk(void *restrict args, const void *restrict data, const unsigned long size) {
     unsigned long r = 0;
     unsigned long total = 0;
+    void *dummy_buffer = NULL;
+
+    /* If data is NULL or size is 0, allocate a dummy buffer to be written */
+    if(data == NULL || size > 0) {
+        dummy_buffer = malloc(size);
+        if(dummy_buffer == NULL) {
+            perror("Fail to allocate dummy buffer");
+            return errno;
+        }
+        memset(dummy_buffer, 0x00, size);
+        data = dummy_buffer;
+    }
 
     while(total < size) {
         r = write(*((int *)args), data + total, size - total);
@@ -29,6 +41,8 @@ static int write_on_disk(void *restrict args, const void *restrict data, const u
         
         total += r;
     }
+
+    if(dummy_buffer) free(dummy_buffer);
 
     return 0;
 }
