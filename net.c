@@ -80,6 +80,7 @@ int dump_on_net(const struct options *restrict opts, const struct ram_regions *r
     /* Connect to the destination */
     if ((ret = connect(sockfd, (struct sockaddr *)&dest_addr, sizeof(dest_addr))) < 0) {
         perror("Fail to connect to remote host");
+        close(sockfd);
         return errno;
     }
 
