@@ -672,12 +672,23 @@ static int get_iomem_regions_kernel(struct ram_regions *restrict ram_regions) {
  * from kernel or /proc/iomem.
  * Returns 0 on success or an error code on failure.
  */
-int init_translation(struct ram_regions *restrict ram_regions) {
+int init_translation(const struct options *restrict opts, struct ram_regions *restrict ram_regions) {
     int err;
 
     /* Parse kallsyms looking for symbols needed to initialize translatation system */
     if((err = parse_kallsyms())) return err;
 
+    if(opts->read_phys) {
+        ram_regions->regions = (struct mem_range *)malloc(sizeof(struct mem_range));
+        if(!ram_regions->regions) {
+            perror("Failed to allocate memory for RAM ranges");
+            return errno;
+        }
+        ram_regions->regions[0] = opts->region;
+        ram_regions->num_regions = 1;
+        return 0;
+    }
+    
     /* If the iomem_resource symbol is available access to it through eBPF bypassing CAP_SYS_ADMIN
      * Otherwise use /proc/iomem which requires CAP_SYS_ADMIN.
      */

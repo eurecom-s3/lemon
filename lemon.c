@@ -10,7 +10,7 @@
 #include "lemon.h"
 
 extern int load_ebpf_mem_progs(void);
-extern int init_translation(struct ram_regions *restrict ram_regions);
+extern int init_translation(const struct options *restrict opts, struct ram_regions *restrict ram_regions);
 extern int dump_on_disk(const struct options *restrict opts, const struct ram_regions *restrict ram_regions);
 extern int dump_on_net(const struct options *restrict opts, const struct ram_regions *restrict ram_regions);
 extern int increase_priority_and_launch_stealers(void);
@@ -18,6 +18,8 @@ extern int join_cpu_stealers(void);
 extern int check_capability(const cap_value_t cap);
 extern int toggle_kptr(void);
 extern void cleanup_mem_ebpf(void);
+
+const char *argp_program_version = "lemon-" VERSION;
 
 /* Constants needed for argparse */
 static const struct argp_option options[] = {
@@ -27,9 +29,42 @@ static const struct argp_option options[] = {
     {"realtime",  'r', 0,           0, "Use realtime priority", 2},
     {"fatal",     'f', 0,           0, "Interrupt the dump in case of memory read error", 2},
     {"raw",       'w', 0,           0, "Produce a RAW dump instead of a LiME one", 2},
+    {"read-phys", 'y', "ADDR:SIZE", 0, "Read physical memory at ADDR for SIZE bytes", 2},
     {0}
 };
 static const char doc[] = "Lemon - An eBPF Memory Dump Tool for x64 and ARM64 Linux and Android";
+
+ 
+/*
+ * parse_mem_range() - Parses an "ADDR:SIZE" string into a mem_range.
+ * @arg:   Input string in the form "ADDR:SIZE" (both values may be decimal or 0x-prefixed hex).
+ * @range: Output mem_range where start = ADDR and end = ADDR + SIZE - 1.
+ *
+ * Returns 0 on success, -1 if the format is invalid or parsing fails.
+ */
+static int parse_mem_range(const char *arg, struct mem_range *range) {
+    char *sep;
+    char *endptr;
+    unsigned long long addr;
+    unsigned long size;
+ 
+    sep = strchr(arg, ':');
+    if (!sep)
+        return -1;
+ 
+    addr = strtoull(arg, &endptr, 0);
+    if (endptr != sep)
+        return -1;
+ 
+    size = strtoul(sep + 1, &endptr, 0);
+    if (*endptr != '\0' || size == 0)
+        return -1;
+ 
+    range->start = addr;
+    range->end   = addr + size - 1;
+ 
+    return 0;
+}
 
 /*
  * parse_opt() - Argument parser callback for argp
@@ -72,6 +107,11 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
             break;
         case 'w':
             opts->raw = true;
+            break;
+        case 'y':
+            if (parse_mem_range(arg, &opts->region) != 0)
+                argp_error(state, "Invalid read-phys argument");
+            opts->read_phys = true;
             break;
         case ARGP_KEY_END:
             /* Validate mutual exclusivity of disk vs net dump */
@@ -171,15 +211,14 @@ int main(int argc, char **argv) {
     if((ret = toggle_kptr())) return ret;
 
     /* Determine the memory dumpable regions */
-    if((ret = init_translation(&ram_regions))) goto cleanup;
+    if((ret = init_translation(&opts, &ram_regions))) goto cleanup;
 
     /* Dump on a file */
     if(opts.disk_mode) {
         if((ret = dump_on_disk(&opts, &ram_regions))) goto cleanup;
-    }
-
+    } else
     /* Dump using TCP packets */
-    else if(opts.network_mode) { 
+    if(opts.network_mode) { 
         if((ret = dump_on_net(&opts, &ram_regions))) goto cleanup;
     }
 

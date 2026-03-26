@@ -12,27 +12,31 @@
 
 #define WARN(msg, ...) fprintf(stderr, "WARNING: " msg "\n", ##__VA_ARGS__)
 
+struct mem_range {
+    unsigned long long start;
+    unsigned long long end;
+};
+
 struct options {
     /* Modes */
     bool disk_mode;
     bool network_mode;
-
+    bool read_phys;
+ 
     /* Disk options */
     char *path;
-
+ 
     /* Network options */
     unsigned long address;
     unsigned short port;
-
+ 
+    /* Read options */
+    struct mem_range region;
+ 
     /* Options */
     bool realtime;
     bool fatal;
     bool raw;
-};
-
-struct mem_range {
-    unsigned long long start;
-    unsigned long long end;
 };
 
 struct ram_regions {

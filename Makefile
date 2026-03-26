@@ -21,9 +21,12 @@ else
 	$(error Unsupported architecture: $(ARCH))
 endif
 
+# Define lemon version string. The release build will replace the first three letters
+VERSION := X.Y.Z-$(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+
 # Define compiler and flags
 CLANG := clang
-CFLAGS := -Wall -O2 -D$(TARGET_ARCH)
+CFLAGS := -Wall -O2 -D$(TARGET_ARCH) -DVERSION=\"$(VERSION)\"
 LDFLAGS := -lbpf -lelf -lz -lzstd -lcap
 
 # MODE-based flags
@@ -106,6 +109,7 @@ config:
 	@echo "  STATIC: $(if $(STATIC),enabled,disabled)"
 	@echo "  ARCH: $(ARCH)"
 	@echo "  TARGET_ARCH: $(TARGET_ARCH)"
+	@echo "  VERSION: $(VERSION)"
 	@echo "  NEEDS_VMLINUX: $(NEEDS_VMLINUX)"
 	@echo "  CFLAGS: $(CFLAGS)"
 	@echo "  BPF_FLAGS: $(BPF_FLAGS)"
