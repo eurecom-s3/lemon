@@ -22,7 +22,7 @@ else
 endif
 
 # Define lemon version string. The release build will replace the first three letters
-VERSION := X.Y.Z-$(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+VERSION := $(shell git describe --tags)
 
 # Define compiler and flags
 CLANG := clang
