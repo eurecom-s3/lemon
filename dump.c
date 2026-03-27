@@ -7,7 +7,8 @@
 
 extern int read_kernel_memory(const uintptr_t addr, const size_t size, unsigned char **restrict data);
 extern uintptr_t phys_to_virt(const uintptr_t phy_addr);
-
+extern bool is_secure_page(uintptr_t page_start);
+extern unsigned char* secure_page_placeholder;
 
 /*
  * dump_region() - Reads a physical memory region and writes it to a destination in chunks.
@@ -35,7 +36,10 @@ static int dump_region(const uintptr_t region_start, const uintptr_t region_end,
         chunk_end = (region_end - chunk_start + 1 > granule) ? chunk_start + granule - 1 : region_end;
         chunk_size = chunk_end - chunk_start + 1;
 
-        if ((ret = read_kernel_memory(phys_to_virt(chunk_start), chunk_size, &read_data))) {
+        if(is_secure_page(chunk_start)) {
+            printf("Skipping secure page 0x%lx\n", chunk_start);
+            read_data = secure_page_placeholder;
+        } else if ((ret = read_kernel_memory(phys_to_virt(chunk_start), chunk_size, &read_data))) {
             fprintf(stderr, "Error reading kernel physical memory. Physical address: 0x%lx, size: 0x%zx. Error code: %d Maybe KFENCE area ?\n", chunk_start, chunk_size, ret);
             
             /* Error reading memory, abort the dump or try with minimum granule of the system */
@@ -77,14 +81,15 @@ static int dump_region(const uintptr_t region_start, const uintptr_t region_end,
  */
 int dump(const struct options *restrict opts, const struct ram_regions *restrict ram_regions, int (*write_f)(void *restrict, const void *restrict, const unsigned long), void *restrict args) {
     int ret = 0;
+    struct mem_range *range;
 
     /* Loop through the system RAM ranges, read the memory ranges and write them on file */
-    for (size_t i = 0; i < ram_regions->num_regions; i++)
+    TAILQ_FOREACH(range, ram_regions, entries)
     {
-        const uintptr_t region_pstart = ram_regions->regions[i].start;
-        const uintptr_t region_pend = ram_regions->regions[i].end;
+        const uintptr_t region_pstart = range->start;
+        const uintptr_t region_pend = range->end - 1; /* Require closed range */
 
-        printf("Dumping Range: 0x%lx-0x%lx\n", region_pstart, region_pend);
+        printf("Dumping Range: 0x%lx-0x%lx\n", region_pstart, region_pend);	
 
         /* Write the LiMe header for that RAM region to the file (only if not RAW format)*/
         if(!opts->raw) {

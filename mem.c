@@ -29,6 +29,9 @@ struct resource {
 #define SYSTEM_RAM_FLAGS            (IORESOURCE_SYSTEM_RAM | IORESOURCE_BUSY)
 
 extern int check_capability(const cap_value_t cap);
+extern int get_iomem_regions_user(struct ram_regions *restrict ram_regions);
+extern int get_iomem_regions_kernel(struct ram_regions *restrict ram_regions);
+extern void init_secure_pages_handler(int64_t memstart_addr);
 
 /* eBPF memory read program skeleton */
 struct mem_ebpf *mem_ebpf_skel;
@@ -437,155 +440,8 @@ static int parse_kallsyms() {
         return EIO;
     }
 
-    return 0;
-}
+    init_secure_pages_handler(v2p_offset);
 
-/*
- * get_iomem_regions_user() - Parse /proc/iomem to extract "System RAM" regions
- * @ram_regions: Pointer to store the extracted RAM regions
- *
- * Opens /proc/iomem, searches for "System RAM" regions, and populates the provided
- * ram_regions struct with the start and end addresses of each region. The function
- * reallocates memory as needed to accommodate additional regions. 
- * Returns 0 on success, or an error code on failure.
- */
-static int get_iomem_regions_user(struct ram_regions *restrict ram_regions) {
-    FILE *fp;
-    char line[256];
-    int slot_availables;
-    uintptr_t start, end;
-    int cap_ret;
-
-    /* Check if we have CAP_SYS_ADMIN capability */
-    if((cap_ret = check_capability(CAP_SYS_ADMIN)) <= 0) {
-        fprintf(stderr, "LEMON does not have CAP_SYS_ADMIN to read /proc/iomem\n");
-        return cap_ret;
-    }
-
-    /* Open the /proc/iomem and parse only "System RAM" regions */
-    fp = fopen("/proc/iomem", "r");
-    if (!fp)
-    {
-        perror("Failed to open /proc/iomem");
-        return errno;
-    }
-
-    /* Initial RAM regions allocations */
-    ram_regions->num_regions = 0;
-    slot_availables = 8;
-
-    ram_regions->regions = (struct mem_range *)malloc(slot_availables * sizeof(struct mem_range));
-    if (!ram_regions->regions)
-    {
-        perror("Failed to allocate memory for RAM ranges");
-        fclose(fp);
-        return errno;
-    }
-
-    /* Look only for "System RAM" regions */
-    while (fgets(line, sizeof(line), fp))
-    {
-        if (strstr(line, "System RAM") && sscanf(line, "%lx-%lx", &start, &end) == 2)
-        {
-            /* If the array is full, reallocate to increase its size */
-            if (ram_regions->num_regions >= slot_availables)
-            {
-                slot_availables *= 2;
-                ram_regions->regions = 
-                    (struct mem_range *)realloc(ram_regions->regions, slot_availables * sizeof(struct mem_range));
-                if (!ram_regions->regions)
-                {
-                    perror("Failed to reallocate memory for RAM ranges");
-                    fclose(fp);
-                    return errno;
-                }
-            }
-
-            /* Save region start and end */
-            (ram_regions->regions)[ram_regions->num_regions].start = start;
-            (ram_regions->regions)[ram_regions->num_regions].end = end;
-            (ram_regions->num_regions)++;
-            
-        }
-    }
-    if(fclose(fp)) {
-        perror("Fail to close /proc/iomem");
-        return errno;
-    }
-
-    return 0;
-}
-
-/*
- * get_iomem_regions_kernel() - Parse struct resources directly in kernel to extract "System RAM" regions
- * @ram_regions: Pointer to store the extracted RAM regions
- *
- * Read struct resources from kernel, and populates the provided
- * ram_regions struct with the start and end addresses of each region. The function
- * reallocates memory as needed to accommodate additional regions. 
- * Returns 0 on success, or an error code on failure.
- */
-static int get_iomem_regions_kernel(struct ram_regions *restrict ram_regions) {
-    int slot_availables;
-    __u8 *data = NULL;
-    struct resource *res, *next_res;
-    int err;
-
-    /* Initial RAM regions allocations */
-    ram_regions->num_regions = 0;
-    slot_availables = 8;
-
-    ram_regions->regions = (struct mem_range *)malloc(slot_availables * sizeof(struct mem_range));
-    if (!ram_regions->regions)
-    {
-        perror("Failed to allocate memory for RAM ranges");
-        return errno;
-    }
-    
-    /* We follow the implementation of LiME considering only sibling leafs (level 1 only).
-     * Is it possible to have "System RAM" regions inside non System RAM regions? I don't think so. 
-     */
-
-    /* Obtain the address child of the root struct */
-    if((err = read_kernel_memory(iomem_resource, sizeof(struct resource), &data))) {
-        fprintf(stderr, "Error reading root struct resource");
-        return err;
-    }
-    res = ((struct resource *)data);
-    next_res = res->child;
-
-    /* Walk the sibling list */
-    while(next_res) {
-        if((err = read_kernel_memory((uintptr_t)next_res, sizeof(struct resource), &data))) {
-            fprintf(stderr, "Error reading sibling struct");
-            return err;
-        }
-        res = ((struct resource *)data);
-
-        /* Check if it is a "System RAM" region using flags instead of string (reduce memory copying from kernel to user) */
-        if(res->name && ((res->flags & SYSTEM_RAM_FLAGS) == SYSTEM_RAM_FLAGS)) {
-            /* If the array is full, reallocate to increase its size */
-            if (ram_regions->num_regions >= slot_availables)
-            {
-                slot_availables *= 2;
-                ram_regions->regions = 
-                    (struct mem_range *)realloc(ram_regions->regions, slot_availables * sizeof(struct mem_range));
-                if (!ram_regions->regions)
-                {
-                    perror("Failed to reallocate memory for RAM ranges");
-                    return errno;
-                }
-            }
-
-            /* Save region start and end */
-            (ram_regions->regions)[ram_regions->num_regions].start = res->start;
-            (ram_regions->regions)[ram_regions->num_regions].end = res->end;
-            (ram_regions->num_regions)++;
-        }
-
-        /* Prepare for next iteration */
-        next_res = res->sibling;
-    }
     return 0;
 }
 
@@ -682,9 +538,9 @@ int init_translation(struct ram_regions *restrict ram_regions) {
      * Otherwise use /proc/iomem which requires CAP_SYS_ADMIN.
      */
 
-    if(iomem_resource) {
-        return get_iomem_regions_kernel(ram_regions);
-    }
-    else
+    // if(iomem_resource) {
+    //     return get_iomem_regions_kernel(ram_regions);
+    // }
+    // else
         return get_iomem_regions_user(ram_regions);
 }

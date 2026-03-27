@@ -18,6 +18,7 @@ extern int join_cpu_stealers(void);
 extern int check_capability(const cap_value_t cap);
 extern int toggle_kptr(void);
 extern void cleanup_mem_ebpf(void);
+extern void range_list_free(struct ram_regions *list);
 
 /* Constants needed for argparse */
 static const struct argp_option options[] = {
@@ -190,6 +191,9 @@ int main(int argc, char **argv) {
 
         /* Restore kptr_restrict if needed */
         if((ret = toggle_kptr())) return ret;
+
+        /* Free memory regions list */
+        range_list_free(&ram_regions);
 
     return ret; // TODO rework all the ret values handling
 }

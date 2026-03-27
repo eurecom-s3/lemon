@@ -3,11 +3,13 @@
 
 #include <stdbool.h>
 #include <errno.h>
+#include <sys/queue.h>
 
 #define MIN_MAJOR_LINUX         5                       /* Minimium kernel version supported */
 #define MIN_MINOR_LINUX         5
 
-#define HUGE_PAGE_SIZE          2 * 1024 * 1024         /* Same for huge pages */
+// TODO: to support secure pages we need to go page by page, make this a bit cleaner
+#define HUGE_PAGE_SIZE          4096//2 * 1024 * 1024   /* Same for huge pages */
 #define DEFAULT_PORT            2304                    /* Default port used for networt dump */
 
 #define WARN(msg, ...) fprintf(stderr, "WARNING: " msg "\n", ##__VA_ARGS__)
@@ -31,14 +33,12 @@ struct options {
 };
 
 struct mem_range {
+    TAILQ_ENTRY(mem_range) entries;
     unsigned long long start;
     unsigned long long end;
 };
 
-struct ram_regions {
-    struct mem_range *regions;
-    unsigned int num_regions;
-};
+TAILQ_HEAD(ram_regions, mem_range);
 
 typedef struct __attribute__((packed)) {
     unsigned int magic;
