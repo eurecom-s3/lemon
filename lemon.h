@@ -25,7 +25,6 @@ struct options {
     unsigned short port;
 
     /* Options */
-    bool realtime;
     bool fatal;
     bool raw;
 };

@@ -13,8 +13,6 @@ extern int load_ebpf_mem_progs(void);
 extern int init_translation(struct ram_regions *restrict ram_regions);
 extern int dump_on_disk(const struct options *restrict opts, const struct ram_regions *restrict ram_regions);
 extern int dump_on_net(const struct options *restrict opts, const struct ram_regions *restrict ram_regions);
-extern int increase_priority_and_launch_stealers(void);
-extern int join_cpu_stealers(void);
 extern int check_capability(const cap_value_t cap);
 extern int toggle_kptr(void);
 extern void cleanup_mem_ebpf(void);
@@ -24,7 +22,6 @@ static const struct argp_option options[] = {
     {"disk",      'd', "PATH",      0, "Dump on disk", 0},
     {"network",   'n', "ADDRESS",   0, "Dump through the network", 1},
     {"port",      'p', "PORT",      0, "Specify port number", 1},
-    {"realtime",  'r', 0,           0, "Use realtime priority", 2},
     {"fatal",     'f', 0,           0, "Interrupt the dump in case of memory read error", 2},
     {"raw",       'w', 0,           0, "Produce a RAW dump instead of a LiME one", 2},
     {0}
@@ -63,9 +60,6 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
         case 'd':
             opts->disk_mode = true;
             opts->path = arg;
-            break;
-        case 'r':
-            opts->realtime = true;
             break;
         case 'f':
             opts->fatal = true;
@@ -156,14 +150,6 @@ int main(int argc, char **argv) {
     opts.port = DEFAULT_PORT;
     argp_parse(&argp, argc, argv, 0, 0, &opts);
 
-    /* Increase process priority and lauch stealers */
-    if(opts.realtime) {
-        ret = increase_priority_and_launch_stealers();
-        if(ret) {
-            WARN("Failed to increase process priority and launch CPU stealers");
-        }
-    }
-
     /* Load eBPF progs that read memory */
     if((ret = load_ebpf_mem_progs())) return ret;
 
@@ -186,7 +172,6 @@ int main(int argc, char **argv) {
     /* Cleanup: close BPF object */
     cleanup:
         cleanup_mem_ebpf();
-        join_cpu_stealers();
 
         /* Restore kptr_restrict if needed */
         if((ret = toggle_kptr())) return ret;
