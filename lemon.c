@@ -19,14 +19,18 @@ extern void cleanup_mem_ebpf(void);
 
 /* Constants needed for argparse */
 static const struct argp_option options[] = {
-    {"disk",      'd', "PATH",      0, "Dump on disk", 0},
-    {"network",   'n', "ADDRESS",   0, "Dump through the network", 1},
-    {"port",      'p', "PORT",      0, "Specify port number", 1},
-    {"fatal",     'f', 0,           0, "Interrupt the dump in case of memory read error", 2},
-    {"raw",       'w', 0,           0, "Produce a RAW dump instead of a LiME one", 2},
+    {0, 0, 0, OPTION_DOC, "Dump modes:", 1},
+    {"disk",      'd', "PATH",          0, "Dump on disk", 1},
+    {"network",   'n', "ADDRESS",       0, "Dump on remote IP address (default port TCP " STR(DEFAULT_PORT) ")", 1},
+    
+    {0, 0, 0, OPTION_DOC, "Behavior options:", 2},
+    {"fatal",     'f', 0,               0, "Interrupt the dump in case of memory read error", 2},
+    {"port",      'p', "PORT",               0, "Remote IP destination port", 2},
+    {"raw",       'w', 0,               0, "Produce a RAW dump instead of a LiME one", 2},
+    
     {0}
 };
-static const char doc[] = "Lemon - An eBPF Memory Dump Tool for x64 and ARM64 Linux and Android";
+static const char doc[] = "LEMON - An eBPF Memory Dump Tool for x64 and ARM64 Linux and Android";
 
 /*
  * parse_opt() - Argument parser callback for argp
@@ -42,40 +46,54 @@ static const char doc[] = "Lemon - An eBPF Memory Dump Tool for x64 and ARM64 Li
 static error_t parse_opt(int key, char *arg, struct argp_state *state) {
     struct options *opts = state->input;
     struct in_addr addr;
+    long port;
+    char *end;
     
     switch (key) {
+        case 'd':
+            if (opts->dump_mode != MODE_NONE) {
+                 argp_error(state, "Options -d and -n are mutually exclusive");
+            }
+            opts->path = arg;
+            opts->dump_mode = MODE_DISK;
+            break;
+
         case 'n':
-	    if (inet_pton(AF_INET, arg, &addr) != 1) {
+            if (opts->dump_mode != MODE_NONE) {
+                argp_error(state, "Options -d and -n are mutually exclusive");
+            }
+            	        
+            if (inet_pton(AF_INET, arg, &addr) != 1) {
                 argp_error(state, "Invalid IP address format");
             }
             opts->address = addr.s_addr;
-            opts->network_mode = true;
+            opts->dump_mode = MODE_NETWORK;
             break;
-        case 'p':
-            opts->port = atoi(arg);
-            if (opts->port <= 0 || opts->port > 65535) {
-                argp_error(state, "Port must be between 1 and 65535");
-            }
-            break;
-        case 'd':
-            opts->disk_mode = true;
-            opts->path = arg;
-            break;
+
         case 'f':
             opts->fatal = true;
             break;
+
+        case 'p':
+            if(opts->dump_mode != MODE_NETWORK) {
+                argp_error(state, "-p can be used only in network dump mode");
+            }
+            errno = 0;
+            port = strtol(arg, &end, 10);
+            if (errno != 0 || *arg == '\0' || *end != '\0' || port < 1 || port > 65535) {
+                argp_error(state, "Port must be between 1 and 65535");
+            }
+            opts->port = (unsigned short)port;
+            break;
+
         case 'w':
             opts->raw = true;
             break;
+
         case ARGP_KEY_END:
-            /* Validate mutual exclusivity of disk vs net dump */
-            if (opts->network_mode && opts->disk_mode) {
-                argp_error(state, "Disk and network mode are mutually exclusive");
-            }
-            
             /* Ensure at least one mode is specified */
-            if (!opts->network_mode && !opts->disk_mode) {
-                argp_error(state, "Either network mode or disk mode must be specified");
+            if (opts->dump_mode == MODE_NONE) {
+                argp_error(state, "Either disk mode or network mode must be specified");
             }
             break;
         default:
@@ -160,12 +178,12 @@ int main(int argc, char **argv) {
     if((ret = init_translation(&ram_regions))) goto cleanup;
 
     /* Dump on a file */
-    if(opts.disk_mode) {
+    if(opts.dump_mode == MODE_DISK) {
         if((ret = dump_on_disk(&opts, &ram_regions))) goto cleanup;
     }
 
     /* Dump using TCP packets */
-    else if(opts.network_mode) { 
+    else if(opts.dump_mode == MODE_NETWORK) { 
         if((ret = dump_on_net(&opts, &ram_regions))) goto cleanup;
     }
 

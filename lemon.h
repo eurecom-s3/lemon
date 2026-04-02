@@ -4,6 +4,9 @@
 #include <stdbool.h>
 #include <errno.h>
 
+#define STR2(x) #x
+#define STR(x) STR2(x)
+
 #define MIN_MAJOR_LINUX         5                       /* Minimium kernel version supported */
 #define MIN_MINOR_LINUX         5
 
@@ -12,17 +15,28 @@
 
 #define WARN(msg, ...) fprintf(stderr, "WARNING: " msg "\n", ##__VA_ARGS__)
 
+enum dump_modes {
+    MODE_NONE = 0,
+    MODE_DISK,
+    MODE_NETWORK
+};
+
 struct options {
+    
     /* Modes */
-    bool disk_mode;
-    bool network_mode;
+    enum dump_modes dump_mode;
 
-    /* Disk options */
-    char *path;
+    /* Mutually exclusive options for disk and network dump modes*/
+    union {
+        /* Disk options */
+        char *path;
 
-    /* Network options */
-    unsigned long address;
-    unsigned short port;
+        struct {
+            /* Network options */
+            unsigned long address;
+            unsigned short port;
+        };
+    };
 
     /* Options */
     bool fatal;
