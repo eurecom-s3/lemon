@@ -51,7 +51,7 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
     
     switch (key) {
         case 'd':
-            if (opts->dump_mode != MODE_NONE) {
+            if (opts->dump_mode != MODE_UNDEFINED) {
                  argp_error(state, "Options -d and -n are mutually exclusive");
             }
             opts->path = arg;
@@ -59,7 +59,7 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
             break;
 
         case 'n':
-            if (opts->dump_mode != MODE_NONE) {
+            if (opts->dump_mode != MODE_UNDEFINED) {
                 argp_error(state, "Options -d and -n are mutually exclusive");
             }
             	        
@@ -92,7 +92,7 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
 
         case ARGP_KEY_END:
             /* Ensure at least one mode is specified */
-            if (opts->dump_mode == MODE_NONE) {
+            if (opts->dump_mode == MODE_UNDEFINED) {
                 argp_error(state, "Either disk mode or network mode must be specified");
             }
             break;

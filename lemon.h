@@ -16,7 +16,7 @@
 #define WARN(msg, ...) fprintf(stderr, "WARNING: " msg "\n", ##__VA_ARGS__)
 
 enum dump_modes {
-    MODE_NONE = 0,
+    MODE_UNDEFINED = 0,
     MODE_DISK,
     MODE_NETWORK
 };
@@ -69,6 +69,10 @@ struct read_mem_result {
 struct read_mem_args {
     unsigned long long addr; 
     unsigned long size;
+};
+
+struct lemon_ctx {
+    struct options opts;
 };
 
 #endif /* LEMON_H */
