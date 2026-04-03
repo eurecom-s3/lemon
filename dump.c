@@ -2,6 +2,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <unistd.h>
+#include <math.h>
 
 #include "lemon.h"
 
@@ -21,35 +22,31 @@ extern uintptr_t phys_to_virt(const struct lemon_ctx *restrict ctx, uintptr_t ph
  * defined by `granule`. If a read fails and `fatal` is false, it retries with the smallest
  * allowed granule (system page size). If that also fails, it writes zero-filled data instead.
  */
-static int dump_region(const struct lemon_ctx *restrict ctx, uintptr_t region_start, const uintptr_t region_end, unsigned int granule, int (*write_f)(void *restrict, const void *restrict, const unsigned long), void *restrict args) {
+static int dump_region(const struct lemon_ctx *restrict ctx, uintptr_t region_start, const uintptr_t region_end, unsigned int granule, int (*write_f)(void *restrict, const void *restrict, const unsigned long), void *restrict args, bool nested) {
     int ret = 0;
     size_t chunk_size;
-    uintptr_t chunk_start, chunk_end;
+    uintptr_t chunk_start, chunk_end, region_size;
     unsigned char *read_data = NULL;
-
+    int last_printed_pct = -1;                          /* track last printed % */
+    region_size = (region_end - region_start + 1);
     chunk_start = region_start;
+
     while (chunk_start <= region_end) {
         /* Read memory region in chunks of maximum granule bytes */
         chunk_end = (region_end - chunk_start + 1 > granule) ? chunk_start + granule - 1 : region_end;
         chunk_size = chunk_end - chunk_start + 1;
 
         if ((ret = read_kernel_memory(phys_to_virt(ctx, chunk_start), chunk_size, &read_data))) {
-            ERR("Error reading physical address 0x%lx (0x%lx) size: 0x%zx. Error code: %d", chunk_start, phys_to_virt(ctx, chunk_start), chunk_size, ret);
-            
-            /* Error reading memory, abort the dump or try with minimum granule of the system */
-            if(ctx->opts.fatal) return ret;
-            
-            if(granule != PAGE_SIZE) {
+            DBG("Error reading physical address 0x%lx (0x%lx) size: 0x%zx. Error code: %d", chunk_start, phys_to_virt(ctx, chunk_start), chunk_size, ret);
+            if (ctx->opts.fatal) return ret;
+            if (granule != PAGE_SIZE) {
                 ERR("Try to read it using the minimum page size available");
-                if((ret = dump_region(ctx, chunk_start, chunk_end, PAGE_SIZE, write_f, args))) return ret;
+                if ((ret = dump_region(ctx, chunk_start, chunk_end, PAGE_SIZE, write_f, args, true))) return ret;
                 goto next_iter;
             }
-            
             // TODO REPLACE WITH "ERROR" PATTERN
-            else memset(read_data, 0x00, chunk_size); /* We are already at the minimum granule, replace with 0x00 */
+            else memset(read_data, 0x00, chunk_size);
         }
-
-        // DBG("Read 0x%lx (0x%lx) Size 0x%lx completed", chunk_start, phys_to_virt(ctx, chunk_start), chunk_size);
 
         /* Save the chunk */
         if ((ret = write_f(args, read_data, chunk_size)) < 0) {
@@ -57,9 +54,27 @@ static int dump_region(const struct lemon_ctx *restrict ctx, uintptr_t region_st
             return ret;
         }
 
-        /* Continue to next chunk */
-        next_iter:
-            chunk_start = chunk_end + 1;
+        if (!nested) {
+            int pct = (int)((chunk_start - region_start) * 100 / region_size);
+            int pct_bucket = (pct / 10) * 10;           /* round down to 0,10,20,...,90 */
+
+            if (pct_bucket > last_printed_pct) {
+                fprintf(stderr, "\033[2K\rDumping range 0x%lx-0x%lx... [%d%%]",
+                        region_start, region_end, pct_bucket);
+                fflush(stderr);
+                last_printed_pct = pct_bucket;
+            }
+        }
+
+    next_iter:
+        chunk_start = chunk_end + 1;
+    }
+
+    /* Always print 100% on completion */
+    if (!nested) {
+        fprintf(stderr, "\033[2K\rDumping range 0x%lx-0x%lx... [100%%]",
+                region_start, region_end);
+        fflush(stderr);
     }
 
     return ret;
@@ -78,14 +93,13 @@ static int dump_region(const struct lemon_ctx *restrict ctx, uintptr_t region_st
  */
 int dump(const struct lemon_ctx *restrict ctx, int (*write_f)(void *restrict, const void *restrict, const unsigned long), void *restrict args) {
     int ret = 0;
+    struct mem_range *range;
 
     /* Loop through the system RAM ranges, read the memory ranges and write them on file */
-    for (size_t i = 0; i < ctx->ram_regions.num_regions; i++)
+    TAILQ_FOREACH(range, &ctx->ram_regions, entries)
     {
-        const uintptr_t region_pstart = ctx->ram_regions.regions[i].start;
-        const uintptr_t region_pend = ctx->ram_regions.regions[i].end;
-
-        INFO("Dumping Range: 0x%lx-0x%lx", region_pstart, region_pend);
+        const uintptr_t region_pstart = range->start;
+        const uintptr_t region_pend = range->end - 1;
 
         /* Write the LiMe header for that RAM region to the file (only if not RAW format)*/
         if(!ctx->opts.raw) {
@@ -106,7 +120,8 @@ int dump(const struct lemon_ctx *restrict ctx, int (*write_f)(void *restrict, co
         }
 
         /* Dump the memory range */
-        if((ret = dump_region(ctx, region_pstart, region_pend, ctx->granule, write_f, args))) return ret;
+        fprintf(stderr, "\n");
+        if((ret = dump_region(ctx, region_pstart, region_pend, ctx->granule, write_f, args, false))) return ret;
     }
 
     return ret;

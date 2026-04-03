@@ -9,26 +9,9 @@
 #include "lemon.h"
 #include "ebpf/mem.ebpf.skel.h"
 
-/* Kernel definition of a memory region (from include/linux/ioport.h) 
- * !!! WARNING !!! In theory this struct can change in different kernel versions
- *                 However last time changes was in Linux 4.6
- */
-struct resource {
-    unsigned long long start;
-    unsigned long long end;
-    const char *name;
-    unsigned long flags;
-    unsigned long desc;
-    struct resource *parent, *sibling, *child;
-};
-
-#define IORESOURCE_MEM		        0x00000200
-#define IORESOURCE_SYSRAM	        0x01000000
-#define IORESOURCE_BUSY		        0x80000000
-#define IORESOURCE_SYSTEM_RAM		(IORESOURCE_MEM|IORESOURCE_SYSRAM)
-#define SYSTEM_RAM_FLAGS            (IORESOURCE_SYSTEM_RAM | IORESOURCE_BUSY)
-
 extern int check_capability(const struct lemon_ctx *restrict ctx, const cap_value_t cap);
+extern int parse_iomem(struct lemon_ctx *restrict ctx);
+
 
 /* eBPF memory read program skeleton */
 struct mem_ebpf *mem_ebpf_skel;
@@ -41,9 +24,6 @@ struct bpf_link *bpf_prog_link = NULL;
 /* File descriptor and mmap() pointer associated to the eBPF map */
 int read_mem_result_fd;
 struct read_mem_result *read_mem_result;
-
-/* Address of root of struct resources list (physical memory regions list) */
-static uintptr_t iomem_resource;
 
 #if defined(__TARGET_ARCH_arm64)
    /*
@@ -407,9 +387,6 @@ static int parse_kallsyms(struct lemon_ctx *restrict ctx) {
         return EPERM;
     }
 
-    /* Symbol to be located in /proc/kallsyms */
-    iomem_resource = 0;
-
     #ifdef __TARGET_ARCH_x86
         char *v2p_symbol = "page_offset_base";
     #elif __TARGET_ARCH_arm64
@@ -428,12 +405,12 @@ static int parse_kallsyms(struct lemon_ctx *restrict ctx) {
     while (fgets(line, sizeof(line), fp)) {
 
         /* Check if all the symbols are already found */
-        if(iomem_resource && ctx->v2p_offset) break;
+        if(ctx->iomem_resource && ctx->v2p_offset) break;
 
         /* Look for symbols */
-        if(!iomem_resource && parse_kallsyms_line(line, "iomem_resource", &current_symb_addr)) {
-            iomem_resource = current_symb_addr;
-            DBG("iomem_resource 0x%lx", iomem_resource);
+        if(!ctx->iomem_resource && parse_kallsyms_line(line, "iomem_resource", &current_symb_addr)) {
+            ctx->iomem_resource = current_symb_addr;
+            DBG("iomem_resource 0x%lx", ctx->iomem_resource);
             continue;
         }
 
@@ -465,160 +442,6 @@ static int parse_kallsyms(struct lemon_ctx *restrict ctx) {
     }
 
     INFO("/proc/kallsyms symbols correctly parsed");
-
-    return 0;
-}
-
-/*
- * get_iomem_regions_user() - Parse /proc/iomem to extract "System RAM" regions
- * @ram_regions: Pointer to store the extracted RAM regions
- *
- * Opens /proc/iomem, searches for "System RAM" regions, and populates the provided
- * ram_regions struct with the start and end addresses of each region. The function
- * reallocates memory as needed to accommodate additional regions. 
- * Returns 0 on success, or an error code on failure.
- */
-static int get_iomem_regions_user(struct lemon_ctx*restrict ctx) {
-    FILE *fp;
-    char line[256];
-    int slot_availables;
-    uintptr_t start, end;
-    int cap_ret;
-
-    /* Check if we have CAP_SYS_ADMIN capability */
-    if((cap_ret = check_capability(ctx, CAP_SYS_ADMIN)) <= 0) {
-        ERR("LEMON does not have CAP_SYS_ADMIN to read /proc/iomem");
-        return cap_ret;
-    }
-
-    /* Open the /proc/iomem and parse only "System RAM" regions */
-    fp = fopen("/proc/iomem", "r");
-    if (!fp)
-    {
-        ERRNO("Failed to open /proc/iomem");
-        return errno;
-    }
-
-    /* Initial RAM regions allocations */
-    ctx->ram_regions.num_regions = 0;
-    slot_availables = 8;
-
-    ctx->ram_regions.regions = (struct mem_range *)malloc(slot_availables * sizeof(struct mem_range));
-    if (!ctx->ram_regions.regions)
-    {
-        ERRNO("Failed to allocate memory for RAM ranges");
-        fclose(fp);
-        return errno;
-    }
-
-    /* Look only for "System RAM" regions */
-    while (fgets(line, sizeof(line), fp))
-    {
-        if (strstr(line, "System RAM") && sscanf(line, "%lx-%lx", &start, &end) == 2)
-        {
-            /* If the array is full, reallocate to increase its size */
-            if (ctx->ram_regions.num_regions >= slot_availables)
-            {
-                slot_availables *= 2;
-                ctx->ram_regions.regions = 
-                    (struct mem_range *)realloc(ctx->ram_regions.regions, slot_availables * sizeof(struct mem_range));
-                if (!ctx->ram_regions.regions)
-                {
-                    ERRNO("Failed to reallocate memory for RAM ranges");
-                    fclose(fp);
-                    return errno;
-                }
-            }
-
-            /* Save region start and end */
-            (ctx->ram_regions.regions)[ctx->ram_regions.num_regions].start = start;
-            (ctx->ram_regions.regions)[ctx->ram_regions.num_regions].end = end;
-            (ctx->ram_regions.num_regions)++;
-            
-        }
-    }
-    if(fclose(fp)) {
-        ERRNO("Fail to close /proc/iomem");
-        return errno;
-    }
-
-    INFO("Physical memory ranges correctly retrieved using /proc/iomem");
-
-    return 0;
-}
-
-/*
- * get_iomem_regions_kernel() - Parse struct resources directly in kernel to extract "System RAM" regions
- * @ram_regions: Pointer to store the extracted RAM regions
- *
- * Read struct resources from kernel, and populates the provided
- * ram_regions struct with the start and end addresses of each region. The function
- * reallocates memory as needed to accommodate additional regions. 
- * Returns 0 on success, or an error code on failure.
- */
-static int get_iomem_regions_kernel(struct lemon_ctx *restrict ctx) {
-    int slot_availables;
-    __u8 *data = NULL;
-    struct resource *res, *next_res;
-    int err;
-
-    /* Initial RAM regions allocations */
-    ctx->ram_regions.num_regions = 0;
-    slot_availables = 8;
-
-    ctx->ram_regions.regions = (struct mem_range *)malloc(slot_availables * sizeof(struct mem_range));
-    if (!ctx->ram_regions.regions)
-    {
-        ERRNO("Failed to allocate memory for RAM ranges");
-        return errno;
-    }
-    
-    /* We follow the implementation of LiME considering only sibling leafs (level 1 only).
-     * Is it possible to have "System RAM" regions inside non System RAM regions? I don't think so. 
-     */
-
-    /* Obtain the address child of the root struct */
-    if((err = read_kernel_memory(iomem_resource, sizeof(struct resource), &data))) {
-        ERR("Error reading root struct resource");
-        return err;
-    }
-    res = ((struct resource *)data);
-    next_res = res->child;
-
-    /* Walk the sibling list */
-    while(next_res) {
-        if((err = read_kernel_memory((uintptr_t)next_res, sizeof(struct resource), &data))) {
-            ERR("Error reading sibling struct");
-            return err;
-        }
-        res = ((struct resource *)data);
-
-        /* Check if it is a "System RAM" region using flags instead of string (reduce memory copying from kernel to user) */
-        if(res->name && ((res->flags & SYSTEM_RAM_FLAGS) == SYSTEM_RAM_FLAGS)) {
-            /* If the array is full, reallocate to increase its size */
-            if (ctx->ram_regions.num_regions >= slot_availables)
-            {
-                slot_availables *= 2;
-                ctx->ram_regions.regions = 
-                    (struct mem_range *)realloc(ctx->ram_regions.regions, slot_availables * sizeof(struct mem_range));
-                if (!ctx->ram_regions.regions)
-                {
-                    ERRNO("Failed to reallocate memory for RAM ranges");
-                    return errno;
-                }
-            }
-
-            /* Save region start and end */
-            (ctx->ram_regions.regions)[ctx->ram_regions.num_regions].start = res->start;
-            (ctx->ram_regions.regions)[ctx->ram_regions.num_regions].end = res->end;
-            (ctx->ram_regions.num_regions)++;
-        }
-
-        /* Prepare for next iteration */
-        next_res = res->sibling;
-    }
-
-    INFO("Physical memory ranges correctly retrieved using resource struct");
 
     return 0;
 }
@@ -713,13 +536,9 @@ int init_translation(struct lemon_ctx *restrict ctx) {
     /* Parse kallsyms looking for symbols needed to initialize translatation system */
     if((err = parse_kallsyms(ctx))) return err;
 
-    /* If the iomem_resource symbol is available access to it through eBPF bypassing CAP_SYS_ADMIN
-     * Otherwise use /proc/iomem which requires CAP_SYS_ADMIN.
-     */
+    /* Obtain the list of physical memory to be dumped */
+    err = parse_iomem(ctx);
 
-    if(iomem_resource && !ctx->opts.force_iomem_user) {
-        return get_iomem_regions_kernel(ctx);
-    }
-    else
-        return get_iomem_regions_user(ctx);
+    return err;
+
 }

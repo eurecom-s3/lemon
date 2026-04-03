@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <sys/utsname.h>
 #include <sys/capability.h>
+#include <sys/queue.h>
 
 #include "ebpf/mem.ebpf.h"
 
@@ -68,14 +69,12 @@ struct options {
 };
 
 struct mem_range {
+    TAILQ_ENTRY(mem_range) entries;
     unsigned long long start;
     unsigned long long end;
 };
+TAILQ_HEAD(ram_regions, mem_range);
 
-struct ram_regions {
-    struct mem_range *regions;
-    unsigned int num_regions;
-};
 
 typedef struct __attribute__((packed)) {
     unsigned int magic;
@@ -88,6 +87,7 @@ typedef struct __attribute__((packed)) {
 struct lemon_ctx {
     struct options opts;
     struct ram_regions ram_regions;
+    uintptr_t iomem_resource; /* Address of root of struct resources list (physical memory regions list) */
     int granule;
 
     struct {

@@ -6,6 +6,7 @@
 #include <bpf/btf.h>
 #include <sys/utsname.h>
 #include <sys/capability.h>
+#include <sys/queue.h>
 
 #include "lemon.h"
 
@@ -16,6 +17,7 @@ extern int dump_on_net(const struct lemon_ctx *restrict ctx);
 extern int check_capability(const struct lemon_ctx *restrict ctx, const cap_value_t cap);
 extern int toggle_kptr(struct lemon_ctx *restrict ctx);
 extern void cleanup_mem_ebpf(void);
+extern void range_list_free(struct ram_regions *list);
 
 const char *architecture = ARCH;
 const char *binary_type = MODE;
@@ -235,6 +237,7 @@ static int init_context(struct lemon_ctx *restrict ctx) {
     ctx->opts.dump_mode = MODE_UNDEFINED;
     ctx->opts.port = DEFAULT_PORT;
     ctx->original_kptr = -1;
+    TAILQ_INIT(&ctx->ram_regions);
 
     return 0;
 }
@@ -290,6 +293,8 @@ static int cleanup_context(struct lemon_ctx *restrict ctx) {
             return errno;
         };
     }
+
+    range_list_free(&ctx->ram_regions);
 
     return ret;
 }
