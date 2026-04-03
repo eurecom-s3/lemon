@@ -123,6 +123,6 @@ int dump(const struct lemon_ctx *restrict ctx, int (*write_f)(void *restrict, co
         fprintf(stderr, "\n");
         if((ret = dump_region(ctx, region_pstart, region_pend, ctx->granule, write_f, args, false))) return ret;
     }
-    fprintf(stderr, "\n");
+    fprintf(stderr, "\n\n");
     return ret;
 }

@@ -298,13 +298,16 @@ int get_iomem_regions_kernel(struct lemon_ctx *ctx, struct ram_regions *ram, str
 
     /* Walk the full tree: children + siblings, kernel-style */
     while (res) {
-        /* Check for System RAM */
-        if (res->name && ((res->flags & SYSTEM_RAM_FLAGS) == SYSTEM_RAM_FLAGS)) {
-            if (!(range = range_new(res->start, res->end + 1))) {
-                ERRNO("Failed to allocate memory for RAM ranges");
+        if (!(range = range_new(res->start, res->end + 1))) {
+                ERRNO("Failed to allocate memory for new ranges");
                 return errno;
             }
+        /* Check for System RAM */
+        if (res->name && ((res->flags & SYSTEM_RAM_FLAGS) == SYSTEM_RAM_FLAGS)) {
             TAILQ_INSERT_TAIL(ram, range, entries);
+        }
+        else {
+            TAILQ_INSERT_TAIL(not_ram, range, entries);
         }
 
         /* Advance to next node in the tree */
