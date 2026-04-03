@@ -26,6 +26,12 @@
 #define ERR(msg, ...)  fprintf(stderr, "[ERROR] " msg "\n", ##__VA_ARGS__)
 #define ERRNO(msg, ...)  fprintf(stderr, "[ERROR] " msg ": %s\n", ##__VA_ARGS__, strerror(errno))
 
+#ifndef TAILQ_FOREACH_SAFE
+#define TAILQ_FOREACH_SAFE(var, head, field, tvar)          \
+    for ((var) = TAILQ_FIRST(head);                         \
+         (var) && ((tvar) = TAILQ_NEXT(var, field), 1);    \
+         (var) = (tvar))
+#endif
 
 enum dump_modes {
     MODE_UNDEFINED = 0,

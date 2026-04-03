@@ -59,7 +59,7 @@ static int dump_region(const struct lemon_ctx *restrict ctx, uintptr_t region_st
             int pct_bucket = (pct / 10) * 10;           /* round down to 0,10,20,...,90 */
 
             if (pct_bucket > last_printed_pct) {
-                fprintf(stderr, "\033[2K\rDumping range 0x%lx-0x%lx... [%d%%]",
+                fprintf(stderr, "\033[2K\r[INFO] Dumping range 0x%lx-0x%lx... [%d%%]",
                         region_start, region_end, pct_bucket);
                 fflush(stderr);
                 last_printed_pct = pct_bucket;
@@ -72,7 +72,7 @@ static int dump_region(const struct lemon_ctx *restrict ctx, uintptr_t region_st
 
     /* Always print 100% on completion */
     if (!nested) {
-        fprintf(stderr, "\033[2K\rDumping range 0x%lx-0x%lx... [100%%]",
+        fprintf(stderr, "\033[2K\r[INFO] Dumping range 0x%lx-0x%lx... [100%%]",
                 region_start, region_end);
         fflush(stderr);
     }
@@ -123,6 +123,6 @@ int dump(const struct lemon_ctx *restrict ctx, int (*write_f)(void *restrict, co
         fprintf(stderr, "\n");
         if((ret = dump_region(ctx, region_pstart, region_pend, ctx->granule, write_f, args, false))) return ret;
     }
-
+    fprintf(stderr, "\n");
     return ret;
 }

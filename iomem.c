@@ -45,11 +45,15 @@ static struct mem_range *range_new(unsigned long long start, unsigned long long 
 
 
 void range_list_free(struct ram_regions *list) {
-    struct mem_range *it;
-    while ((it = TAILQ_FIRST(list)) != NULL) {
-        TAILQ_REMOVE(list, it, entries);
+    struct mem_range *it, *tmp;
+    if(!list) return;
+
+    TAILQ_FOREACH_SAFE(it, list, entries, tmp) {
+        TAILQ_REMOVE(list, it, entries);  /* sicuro: tmp salva il next prima */
         free(it);
     }
+
+    TAILQ_INIT(list);
 }
 
 /* Comparator for qsort – arr elements are struct mem_range *, so qsort
@@ -226,6 +230,7 @@ int get_iomem_regions_user(struct lemon_ctx *ctx, struct ram_regions *ram, struc
  * reallocates memory as needed to accommodate additional regions. 
  * Returns 0 on success, or an error code on failure.
  */
+// TODO: explore also child and save not_ram ones
 int get_iomem_regions_kernel(struct lemon_ctx *ctx, struct ram_regions *ram, struct ram_regions *not_ram) {
     __u8 *data = NULL;
     struct resource *res, *next_res;

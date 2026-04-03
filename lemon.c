@@ -284,7 +284,7 @@ static int collect_system_info(struct lemon_ctx *restrict ctx) {
     return 0;
 }
 
-static int cleanup_context(struct lemon_ctx *restrict ctx) {
+static int cleanup_context(struct lemon_ctx *ctx) {
     int ret = 0;
     
     if(ctx->capabilities) {
