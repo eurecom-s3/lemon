@@ -221,6 +221,46 @@ int get_iomem_regions_user(struct lemon_ctx *ctx, struct ram_regions *ram, struc
     return 0;
 }
 
+static struct resource *next_resource_uspace(const struct lemon_ctx *ctx,
+                                              struct resource *cur,
+                                              struct resource *subtree_root,
+                                              __u8 **data)
+{
+    int err;
+    struct resource *p = cur;
+
+    /* Go into children first */
+    if (p->child) {
+        if ((err = read_kernel_memory((uintptr_t)p->child, sizeof(struct resource), data))) {
+            ERR("Error reading child struct resource at %p", p->child);
+            return NULL;
+        }
+        return (struct resource *)*data;
+    }
+
+    /* Walk up until we find a sibling */
+    while (!p->sibling && p->parent) {
+        if (p->parent == subtree_root)
+            return NULL;
+
+        if ((err = read_kernel_memory((uintptr_t)p->parent, sizeof(struct resource), data))) {
+            ERR("Error reading parent struct resource at %p", p->parent);
+            return NULL;
+        }
+        p = (struct resource *)*data;
+    }
+
+    /* Follow sibling */
+    if (!p->sibling)
+        return NULL;
+
+    if ((err = read_kernel_memory((uintptr_t)p->sibling, sizeof(struct resource), data))) {
+        ERR("Error reading sibling struct resource at %p", p->sibling);
+        return NULL;
+    }
+    return (struct resource *)*data;
+}
+
 /*
  * get_iomem_regions_kernel() - Parse struct resources directly in kernel to extract "System RAM" regions
  * @ram_regions: Pointer to store the extracted RAM regions
@@ -230,51 +270,54 @@ int get_iomem_regions_user(struct lemon_ctx *ctx, struct ram_regions *ram, struc
  * reallocates memory as needed to accommodate additional regions. 
  * Returns 0 on success, or an error code on failure.
  */
-// TODO: explore also child and save not_ram ones
-int get_iomem_regions_kernel(struct lemon_ctx *ctx, struct ram_regions *ram, struct ram_regions *not_ram) {
+int get_iomem_regions_kernel(struct lemon_ctx *ctx, struct ram_regions *ram, struct ram_regions *not_ram)
+{
     __u8 *data = NULL;
-    struct resource *res, *next_res;
+    struct resource *res, root;
+    struct resource *cur_kptr;          /* current kernel-space pointer */
     int err;
     struct mem_range *range;
 
-    /* Obtain the address child of the root struct */
-    if((err = read_kernel_memory(ctx->iomem_resource, sizeof(struct resource), &data))) {
+    /* Read the root resource struct */
+    if ((err = read_kernel_memory(ctx->iomem_resource, sizeof(struct resource), &data))) {
         ERR("Error reading root struct resource");
         return err;
     }
-    res = ((struct resource *)data);
-    next_res = res->child;
+    memcpy(&root, data, sizeof(root));  /* save root for subtree boundary check */
 
-    /* Walk the sibling list */
-    while(next_res) {
-        if((err = read_kernel_memory((uintptr_t)next_res, sizeof(struct resource), &data))) {
-            ERR("Error reading sibling struct");
-            return err;
-        }
-        res = ((struct resource *)data);
+    /* Start from root->child */
+    if (!root.child)
+        return 0;
 
-        /* Check if it is a "System RAM" region using flags instead of string (reduce memory copying from kernel to user) */
-        if(res->name && ((res->flags & SYSTEM_RAM_FLAGS) == SYSTEM_RAM_FLAGS)) {           
-            
-            /* Save region start and end */
-             if(!(range = (range_new(res->start, res->end + 1)))) {
+    cur_kptr = root.child;
+    if ((err = read_kernel_memory((uintptr_t)cur_kptr, sizeof(struct resource), &data))) {
+        ERR("Error reading first child struct resource");
+        return err;
+    }
+    res = (struct resource *)data;
+
+    /* Walk the full tree: children + siblings, kernel-style */
+    while (res) {
+        /* Check for System RAM */
+        if (res->name && ((res->flags & SYSTEM_RAM_FLAGS) == SYSTEM_RAM_FLAGS)) {
+            if (!(range = range_new(res->start, res->end + 1))) {
                 ERRNO("Failed to allocate memory for RAM ranges");
                 return errno;
             }
-
             TAILQ_INSERT_TAIL(ram, range, entries);
         }
 
-        /* Prepare for next iteration */
-        next_res = res->sibling;
+        /* Advance to next node in the tree */
+        struct resource cur_copy = *res;    /* copy before data buffer is overwritten */
+        res = next_resource_uspace(ctx, &cur_copy, &root, &data);
     }
 
-    /* Filter ranges to have not overlapping ranges */
+    /* Filter ranges to have non-overlapping ranges */
     tailq_sort(ram);
     tailq_sort(not_ram);
     range_merge_overlaps(ram);
     range_merge_overlaps(not_ram);
-    
+
     return 0;
 }
 
