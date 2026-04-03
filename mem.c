@@ -28,7 +28,7 @@ struct resource {
 #define IORESOURCE_SYSTEM_RAM		(IORESOURCE_MEM|IORESOURCE_SYSRAM)
 #define SYSTEM_RAM_FLAGS            (IORESOURCE_SYSTEM_RAM | IORESOURCE_BUSY)
 
-extern int check_capability(const cap_value_t cap);
+extern int check_capability(const struct lemon_ctx *restrict ctx, const cap_value_t cap);
 
 /* eBPF memory read program skeleton */
 struct mem_ebpf *mem_ebpf_skel;
@@ -41,13 +41,6 @@ struct bpf_link *bpf_prog_link = NULL;
 /* File descriptor and mmap() pointer associated to the eBPF map */
 int read_mem_result_fd;
 struct read_mem_result *read_mem_result;
-
-/* Offset used to perform physical to virtual address translation in x86 and ARM64 */
-#ifdef __TARGET_ARCH_x86
-    static uintptr_t v2p_offset;
-#elif __TARGET_ARCH_arm64
-    static int64_t v2p_offset;
-#endif
 
 /* Address of root of struct resources list (physical memory regions list) */
 static uintptr_t iomem_resource;
@@ -72,7 +65,7 @@ static uintptr_t iomem_resource;
         }
         
         if (munmap(mapped_addr, size) == -1) {
-            perror("Failed to munmap");
+            ERRNO("Failed to munmap");
             return false;
         }
 
@@ -150,7 +143,7 @@ static int init_udp_socket() {
     /* Create UDP socket */
     udp_sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (udp_sockfd < 0) {
-        perror("Failed to create UDP socket for XDP trigger");
+        ERRNO("Failed to create UDP socket for XDP trigger");
         return -errno;
     }
 
@@ -169,18 +162,18 @@ static int init_udp_socket() {
  * Opens, loads, attaches the eBPF programs, and sets up shared memory. 
  * Returns 0 on success or a negative error code on failure.
  */
-int load_ebpf_mem_progs() {
+int load_ebpf_mem_progs(struct lemon_ctx *restrict ctx) {
     int ret;
 
     /* Check if we have sufficient capabilities to set RLIMIT_MEMLOCK (required by libbpf...)*/
-    if((check_capability(CAP_PERFMON) <= 0) && (check_capability(CAP_SYS_ADMIN) <= 0)) {
+    if((check_capability(ctx, CAP_PERFMON) <= 0) && (check_capability(ctx, CAP_SYS_ADMIN) <= 0)) {
         WARN("LEMON does not have CAP_PERFMON needed to modify RLIMIT_MEMLOCK");
     }
 
     /* Open the BPF object file */
     mem_ebpf_skel = mem_ebpf__open();
     if(!mem_ebpf_skel) {
-        perror("Failed to open BPF skeleton");
+        ERRNO("Failed to open BPF skeleton");
         return -errno;
     }
 
@@ -199,26 +192,30 @@ int load_ebpf_mem_progs() {
 
     /* Load the BPF objectes */
     if (mem_ebpf__load(mem_ebpf_skel)) {
-        perror("Failed to load BPF object");
+        ERRNO("Failed to load BPF object");
         return -errno;
     }
 
     /* Attach the uprobe to the 'read_kernel_memory' function in the current executable */
     bpf_prog_link = bpf_program__attach(mem_ebpf_skel->progs.read_kernel_memory_uprobe);
-    if (!bpf_prog_link) {
+    if (bpf_prog_link && !ctx->opts.force_xdp) {
+        ctx->ebpf_trigger = UPROBE;
+    } 
+    else {
+        ctx->ebpf_trigger = XDP;
         fprintf(stderr, "Failed to attach eBPF Uprobe program, use XDP fallback...\n");
         
         /* Get loopback interface index by name "lo" (usually 1) */
         int ifindex = if_nametoindex(loopback_interface);
         if (ifindex <= 0) {
-            perror("Failed to get interface index");
+            ERRNO("Failed to get interface index");
             return -errno;
         }
         
         /* Attach XDP program to the interface */
         bpf_prog_link = bpf_program__attach_xdp(mem_ebpf_skel->progs.read_kernel_memory_xdp, ifindex);
         if (!bpf_prog_link) {
-            fprintf(stderr, "Failed to attach XDP program to interface %s...\n", loopback_interface);
+            ERR("Failed to attach XDP program to interface %s", loopback_interface);
             return -errno;
         }
         
@@ -227,11 +224,14 @@ int load_ebpf_mem_progs() {
             return ret;
         }
     }
+    // TODO: implment the BPF_PROG_TEST_RUN mode
     
     /* Create the mmap */
     if((ret = init_mmap())) {
         return ret;
     }
+
+    INFO("eBPF program loaded");
 
     return 0;
 }
@@ -256,6 +256,8 @@ void cleanup_mem_ebpf() {
         close(udp_sockfd);
         udp_sockfd = -1;
     }
+
+    INFO("eBPF program unloaded");
 }
 
 /*
@@ -265,11 +267,11 @@ void cleanup_mem_ebpf() {
  * Performs architecture-specific translation using kernel direct mapping.
  * Currently supports x86_64 and ARM64 only.
  */
-uintptr_t phys_to_virt(const uintptr_t phy_addr) {
+uintptr_t phys_to_virt(const struct lemon_ctx *restrict ctx, const uintptr_t phy_addr) {
     #ifdef __TARGET_ARCH_x86
-        return phy_addr + v2p_offset;
+        return phy_addr + ctx->v2p_offset;
     #elif __TARGET_ARCH_arm64
-        return phy_addr - v2p_offset;
+        return phy_addr - ctx->v2p_offset;
     #else
         return phy_addr;
     #endif
@@ -299,7 +301,7 @@ static int send_udp_trigger_packet(const uintptr_t addr, const size_t size) {
     sent_bytes = sendto(udp_sockfd, &args, sizeof(args), 0, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
 
     if (sent_bytes < 0) {
-        perror("Failed to send UDP trigger packet");
+        ERRNO("Failed to send UDP trigger packet");
         return -errno;
     }
 
@@ -322,6 +324,7 @@ static int send_udp_trigger_packet(const uintptr_t addr, const size_t size) {
  * The function is marked with `noinline` and `optnone` to ensure the code is not optimized or inlined by the compiler.
  */
 int __attribute__((noinline, optnone)) read_kernel_memory(const uintptr_t addr, const size_t size, __u8 **restrict data) {
+    // ctx->opts.simulate!
     /* If the Uprobe support is not active in kernel, use XDP to read the memory*/
     if(udp_sockfd > 0) {
         int ret;
@@ -366,7 +369,7 @@ static int inline parse_kallsyms_line(const char *restrict line, const char *res
  * translation offset and the pointer to the tree of physical memory regions. 
  * Returns 0 on success, or an error code on failure.
  */
-static int parse_kallsyms() {
+static int parse_kallsyms(struct lemon_ctx *restrict ctx) {
     FILE *fp;
     char line[256];
     __u8 *data = NULL;
@@ -377,14 +380,13 @@ static int parse_kallsyms() {
     _Static_assert(sizeof(uintptr_t) == sizeof(int64_t), "sizeof(uintptr_t) != sizeof(int64_t)");
 
     /* Check for capabilities */
-    if((check_capability(CAP_SYSLOG) <= 0)) {
-        fprintf(stderr, "LEMON does not have CAP_SYSLOG to read addresses from /proc/kallsyms\n");
+    if((check_capability(ctx, CAP_SYSLOG) <= 0)) {
+        ERR("LEMON does not have CAP_SYSLOG to read addresses from /proc/kallsyms");
         return EPERM;
     }
 
     /* Symbol to be located in /proc/kallsyms */
     iomem_resource = 0;
-    v2p_offset = 0;
 
     #ifdef __TARGET_ARCH_x86
         char *v2p_symbol = "page_offset_base";
@@ -396,7 +398,7 @@ static int parse_kallsyms() {
     fp = fopen("/proc/kallsyms", "r");
     if (!fp)
     {
-        perror("Failed to open /proc/kallsyms");
+        ERRNO("Failed to open /proc/kallsyms");
         return errno;
     }
 
@@ -404,38 +406,43 @@ static int parse_kallsyms() {
     while (fgets(line, sizeof(line), fp)) {
 
         /* Check if all the symbols are already found */
-        if(iomem_resource && v2p_offset) break;
+        if(iomem_resource && ctx->v2p_offset) break;
 
         /* Look for symbols */
         if(!iomem_resource && parse_kallsyms_line(line, "iomem_resource", &current_symb_addr)) {
             iomem_resource = current_symb_addr;
+            DBG("iomem_resource 0x%lx", iomem_resource);
             continue;
         }
 
-        if(!v2p_offset && parse_kallsyms_line(line, v2p_symbol, &current_symb_addr)) {
+        if(!ctx->v2p_offset && parse_kallsyms_line(line, v2p_symbol, &current_symb_addr)) {
 
             /* Read it to obtain the offset */
             if((err = read_kernel_memory(current_symb_addr, sizeof(uintptr_t), &data))) break;
             #ifdef __TARGET_ARCH_x86
-                v2p_offset = *((uintptr_t *)data);
+                ctx->v2p_offset = *((uintptr_t *)data);
             #elif __TARGET_ARCH_arm64
-                v2p_offset = *((int64_t *)data);
+                ctx->v2p_offset = *((int64_t *)data);
             #endif
+
+            DBG("v2p_offset 0x%lx", ctx->v2p_offset);
             continue;
         }
     }
 
     if(fclose(fp)) {
-        perror("Fail to close /proc/kallsyms");
+        ERRNO("Fail to close /proc/kallsyms");
         return errno;
     }
 
     /* Check if all the virtual to phisical offset is found */
-    if (!v2p_offset)
+    if (!ctx->v2p_offset)
     {
-        fprintf(stderr, "Symbol %s not found in /proc/kallsyms\n", v2p_symbol);
+        ERR("Symbol %s not found in /proc/kallsyms", v2p_symbol);
         return EIO;
     }
+
+    INFO("/proc/kallsyms symbols correctly parsed");
 
     return 0;
 }
@@ -449,7 +456,7 @@ static int parse_kallsyms() {
  * reallocates memory as needed to accommodate additional regions. 
  * Returns 0 on success, or an error code on failure.
  */
-static int get_iomem_regions_user(struct ram_regions *restrict ram_regions) {
+static int get_iomem_regions_user(struct lemon_ctx*restrict ctx) {
     FILE *fp;
     char line[256];
     int slot_availables;
@@ -457,8 +464,8 @@ static int get_iomem_regions_user(struct ram_regions *restrict ram_regions) {
     int cap_ret;
 
     /* Check if we have CAP_SYS_ADMIN capability */
-    if((cap_ret = check_capability(CAP_SYS_ADMIN)) <= 0) {
-        fprintf(stderr, "LEMON does not have CAP_SYS_ADMIN to read /proc/iomem\n");
+    if((cap_ret = check_capability(ctx, CAP_SYS_ADMIN)) <= 0) {
+        ERR("LEMON does not have CAP_SYS_ADMIN to read /proc/iomem");
         return cap_ret;
     }
 
@@ -466,18 +473,18 @@ static int get_iomem_regions_user(struct ram_regions *restrict ram_regions) {
     fp = fopen("/proc/iomem", "r");
     if (!fp)
     {
-        perror("Failed to open /proc/iomem");
+        ERRNO("Failed to open /proc/iomem");
         return errno;
     }
 
     /* Initial RAM regions allocations */
-    ram_regions->num_regions = 0;
+    ctx->ram_regions.num_regions = 0;
     slot_availables = 8;
 
-    ram_regions->regions = (struct mem_range *)malloc(slot_availables * sizeof(struct mem_range));
-    if (!ram_regions->regions)
+    ctx->ram_regions.regions = (struct mem_range *)malloc(slot_availables * sizeof(struct mem_range));
+    if (!ctx->ram_regions.regions)
     {
-        perror("Failed to allocate memory for RAM ranges");
+        ERRNO("Failed to allocate memory for RAM ranges");
         fclose(fp);
         return errno;
     }
@@ -488,30 +495,32 @@ static int get_iomem_regions_user(struct ram_regions *restrict ram_regions) {
         if (strstr(line, "System RAM") && sscanf(line, "%lx-%lx", &start, &end) == 2)
         {
             /* If the array is full, reallocate to increase its size */
-            if (ram_regions->num_regions >= slot_availables)
+            if (ctx->ram_regions.num_regions >= slot_availables)
             {
                 slot_availables *= 2;
-                ram_regions->regions = 
-                    (struct mem_range *)realloc(ram_regions->regions, slot_availables * sizeof(struct mem_range));
-                if (!ram_regions->regions)
+                ctx->ram_regions.regions = 
+                    (struct mem_range *)realloc(ctx->ram_regions.regions, slot_availables * sizeof(struct mem_range));
+                if (!ctx->ram_regions.regions)
                 {
-                    perror("Failed to reallocate memory for RAM ranges");
+                    ERRNO("Failed to reallocate memory for RAM ranges");
                     fclose(fp);
                     return errno;
                 }
             }
 
             /* Save region start and end */
-            (ram_regions->regions)[ram_regions->num_regions].start = start;
-            (ram_regions->regions)[ram_regions->num_regions].end = end;
-            (ram_regions->num_regions)++;
+            (ctx->ram_regions.regions)[ctx->ram_regions.num_regions].start = start;
+            (ctx->ram_regions.regions)[ctx->ram_regions.num_regions].end = end;
+            (ctx->ram_regions.num_regions)++;
             
         }
     }
     if(fclose(fp)) {
-        perror("Fail to close /proc/iomem");
+        ERRNO("Fail to close /proc/iomem");
         return errno;
     }
+
+    INFO("Physical memory ranges correctly retrieved using /proc/iomem");
 
     return 0;
 }
@@ -525,20 +534,20 @@ static int get_iomem_regions_user(struct ram_regions *restrict ram_regions) {
  * reallocates memory as needed to accommodate additional regions. 
  * Returns 0 on success, or an error code on failure.
  */
-static int get_iomem_regions_kernel(struct ram_regions *restrict ram_regions) {
+static int get_iomem_regions_kernel(struct lemon_ctx *restrict ctx) {
     int slot_availables;
     __u8 *data = NULL;
     struct resource *res, *next_res;
     int err;
 
     /* Initial RAM regions allocations */
-    ram_regions->num_regions = 0;
+    ctx->ram_regions.num_regions = 0;
     slot_availables = 8;
 
-    ram_regions->regions = (struct mem_range *)malloc(slot_availables * sizeof(struct mem_range));
-    if (!ram_regions->regions)
+    ctx->ram_regions.regions = (struct mem_range *)malloc(slot_availables * sizeof(struct mem_range));
+    if (!ctx->ram_regions.regions)
     {
-        perror("Failed to allocate memory for RAM ranges");
+        ERRNO("Failed to allocate memory for RAM ranges");
         return errno;
     }
     
@@ -548,7 +557,7 @@ static int get_iomem_regions_kernel(struct ram_regions *restrict ram_regions) {
 
     /* Obtain the address child of the root struct */
     if((err = read_kernel_memory(iomem_resource, sizeof(struct resource), &data))) {
-        fprintf(stderr, "Error reading root struct resource");
+        ERR("Error reading root struct resource");
         return err;
     }
     res = ((struct resource *)data);
@@ -557,7 +566,7 @@ static int get_iomem_regions_kernel(struct ram_regions *restrict ram_regions) {
     /* Walk the sibling list */
     while(next_res) {
         if((err = read_kernel_memory((uintptr_t)next_res, sizeof(struct resource), &data))) {
-            fprintf(stderr, "Error reading sibling struct");
+            ERR("Error reading sibling struct");
             return err;
         }
         res = ((struct resource *)data);
@@ -565,27 +574,30 @@ static int get_iomem_regions_kernel(struct ram_regions *restrict ram_regions) {
         /* Check if it is a "System RAM" region using flags instead of string (reduce memory copying from kernel to user) */
         if(res->name && ((res->flags & SYSTEM_RAM_FLAGS) == SYSTEM_RAM_FLAGS)) {
             /* If the array is full, reallocate to increase its size */
-            if (ram_regions->num_regions >= slot_availables)
+            if (ctx->ram_regions.num_regions >= slot_availables)
             {
                 slot_availables *= 2;
-                ram_regions->regions = 
-                    (struct mem_range *)realloc(ram_regions->regions, slot_availables * sizeof(struct mem_range));
-                if (!ram_regions->regions)
+                ctx->ram_regions.regions = 
+                    (struct mem_range *)realloc(ctx->ram_regions.regions, slot_availables * sizeof(struct mem_range));
+                if (!ctx->ram_regions.regions)
                 {
-                    perror("Failed to reallocate memory for RAM ranges");
+                    ERRNO("Failed to reallocate memory for RAM ranges");
                     return errno;
                 }
             }
 
             /* Save region start and end */
-            (ram_regions->regions)[ram_regions->num_regions].start = res->start;
-            (ram_regions->regions)[ram_regions->num_regions].end = res->end;
-            (ram_regions->num_regions)++;
+            (ctx->ram_regions.regions)[ctx->ram_regions.num_regions].start = res->start;
+            (ctx->ram_regions.regions)[ctx->ram_regions.num_regions].end = res->end;
+            (ctx->ram_regions.num_regions)++;
         }
 
         /* Prepare for next iteration */
         next_res = res->sibling;
     }
+
+    INFO("Physical memory ranges correctly retrieved using resource struct");
+
     return 0;
 }
 
@@ -595,8 +607,7 @@ static int get_iomem_regions_kernel(struct ram_regions *restrict ram_regions) {
  * Reads and toggles /proc/sys/kernel/kptr_restrict between 0 and its original value (only if needed).
  * Caches the original value on first call. Returns 0 on success, or an error code on failure.
  */
- int toggle_kptr(void) {
-    static int orig_kptr_status = - 1;
+ int toggle_kptr(struct lemon_ctx *restrict ctx) {
 
     struct stat stat_tmp;
     FILE *kptr_fd;
@@ -604,36 +615,36 @@ static int get_iomem_regions_kernel(struct ram_regions *restrict ram_regions) {
 
     /* If kptr_restrict does not exists (?) do nothing */
     if(stat("/proc/sys/kernel/kptr_restrict", &stat_tmp)) {
-        perror("/proc/sys/kernel/kptr_restrict not found");
+        WARN("/proc/sys/kernel/kptr_restrict not found");
         return 0;
     }
 
     /* Open the file */
     if(!(kptr_fd = fopen("/proc/sys/kernel/kptr_restrict", "r"))) {
-        perror("Failed to open /proc/sys/kernel/kptr_restrict");
+        ERRNO("Failed to open /proc/sys/kernel/kptr_restrict");
         return errno;
     }
     
     /* Read current kptr_status */
     if(fscanf(kptr_fd, "%d", &current_kptr_status) == EOF) {
-        perror("Fail to read /proc/sys/kernel/kptr_restrict");
+        ERRNO("Fail to read /proc/sys/kernel/kptr_restrict");
         err = errno;
         goto cleanup;
     }
 
     /* Save the original value */
-    if(orig_kptr_status == -1) {
-        orig_kptr_status = current_kptr_status;
+    if(ctx->original_kptr == -1) {
+        ctx->original_kptr = current_kptr_status;
     }
 
     /* If the original kptr_value is 0 do nothing */
-    if(!orig_kptr_status) goto cleanup;
+    if(!ctx->original_kptr) goto cleanup;
 
     /* If the value is 1 and we have CAP_SYSLOG is not necessary to toggle it (neigter CAP_SYS_ADMIN!) :) */
-    if((orig_kptr_status == 1) && (check_capability(CAP_SYSLOG) > 0)) goto cleanup;
+    if((ctx->original_kptr == 1) && (check_capability(ctx, CAP_SYSLOG) > 0)) goto cleanup;
 
     /* Check CAP_SYS_ADMIN to modify kptr_restrict */
-    if((cap_ret = check_capability(CAP_SYS_ADMIN)) <= 0) {
+    if((cap_ret = check_capability(ctx, CAP_SYS_ADMIN)) <= 0) {
         fprintf(stderr, "LEMON does not have CAP_SYS_ADMIN to modify /proc/sys/kernel/kptr_restrict policy\n");
         err = cap_ret;
         goto cleanup;
@@ -641,22 +652,24 @@ static int get_iomem_regions_kernel(struct ram_regions *restrict ram_regions) {
 
     /* Reopen the file in RW mode */
     if(!(kptr_fd = freopen(NULL, "r+", kptr_fd))) {
-        perror("Failed to open /proc/sys/kernel/kptr_restrict in RW mode");
+        ERRNO("Failed to open /proc/sys/kernel/kptr_restrict in RW mode");
         err = errno;
         goto cleanup;
     }
 
     /* Toggle the kptr_restrict value*/
-    new_kptr_status = (current_kptr_status > 0) ? 0 : orig_kptr_status;
+    new_kptr_status = (current_kptr_status > 0) ? 0 : ctx->original_kptr;
     if(fprintf(kptr_fd, "%d", new_kptr_status) < 0) {
         err = EIO;
         goto cleanup;
     }
 
+    INFO("kptr_restrict toggled");
+
     cleanup:
     if(kptr_fd) {
         if(fclose(kptr_fd)) {
-            perror("Fail to close /proc/sys/kernel/kptr_restrict");
+            ERRNO("Fail to close /proc/sys/kernel/kptr_restrict");
             return errno;
         }
     }
@@ -672,19 +685,19 @@ static int get_iomem_regions_kernel(struct ram_regions *restrict ram_regions) {
  * from kernel or /proc/iomem.
  * Returns 0 on success or an error code on failure.
  */
-int init_translation(struct ram_regions *restrict ram_regions) {
+int init_translation(struct lemon_ctx *restrict ctx) {
     int err;
 
     /* Parse kallsyms looking for symbols needed to initialize translatation system */
-    if((err = parse_kallsyms())) return err;
+    if((err = parse_kallsyms(ctx))) return err;
 
     /* If the iomem_resource symbol is available access to it through eBPF bypassing CAP_SYS_ADMIN
      * Otherwise use /proc/iomem which requires CAP_SYS_ADMIN.
      */
 
-    if(iomem_resource) {
-        return get_iomem_regions_kernel(ram_regions);
+    if(iomem_resource && !ctx->opts.force_iomem_user) {
+        return get_iomem_regions_kernel(ctx);
     }
     else
-        return get_iomem_regions_user(ram_regions);
+        return get_iomem_regions_user(ctx);
 }

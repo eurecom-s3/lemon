@@ -1,6 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/capability.h>
+#include <string.h>
 
 #include "lemon.h"
 
@@ -26,32 +27,14 @@
  * capability is present in the effective set, and returns the result.
  * Returns 1 if the capability is set, 0 if not set, and a negative errno value on error.
  */
-int check_capability(const cap_value_t cap) {
-    cap_t caps;
+int check_capability(struct lemon_ctx *restrict ctx, cap_value_t cap) {
     cap_flag_value_t cap_flag;
-    int ret = 0;
 
-    /* Get process capabilities */
-    caps = cap_get_proc();
-    if (caps == NULL) {
-        perror("Fail to get current capabilities");
+    /* Get effective capabilities */
+    if (cap_get_flag(ctx->capabilities, cap, CAP_EFFECTIVE, &cap_flag) == -1) {
+        ERRNO("Fail to get effective capabilities");
         return -errno;
     }
 
-
-    /* Get effective capabilities */
-    if (cap_get_flag(caps, cap, CAP_EFFECTIVE, &cap_flag) == -1) {
-        perror("Fail to get effective capabilities");
-        ret = -errno;
-        goto cleanup;
-    }
-
-    cleanup:
-        if((ret = cap_free(caps))) {
-            perror("Fail to free capabilities struct");
-            return -errno;
-        };
-
-    if(!ret) ret = (cap_flag == CAP_SET);
-    return ret;
+    return(cap_flag == CAP_SET);
 }

@@ -28,7 +28,7 @@
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_endian.h>
 
-#include "../lemon.h"
+#include "mem.ebpf.h"
 
 /* Mapping used to pass the memory content to userspace */
 struct {

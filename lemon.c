@@ -9,13 +9,18 @@
 
 #include "lemon.h"
 
-extern int load_ebpf_mem_progs(void);
-extern int init_translation(struct ram_regions *restrict ram_regions);
-extern int dump_on_disk(const struct options *restrict opts, const struct ram_regions *restrict ram_regions);
-extern int dump_on_net(const struct options *restrict opts, const struct ram_regions *restrict ram_regions);
-extern int check_capability(const cap_value_t cap);
-extern int toggle_kptr(void);
+extern int load_ebpf_mem_progs(struct lemon_ctx *restrict ctx);
+extern int init_translation(struct lemon_ctx *restrict ctx);
+extern int dump_on_disk(const struct lemon_ctx *restrict ctx);
+extern int dump_on_net(const struct lemon_ctx *restrict ctx);
+extern int check_capability(const struct lemon_ctx *restrict ctx, const cap_value_t cap);
+extern int toggle_kptr(struct lemon_ctx *restrict ctx);
 extern void cleanup_mem_ebpf(void);
+
+const char *architecture = ARCH;
+const char *binary_type = MODE;
+const char *lemon_version = "lemon-" BRANCH "-" VERSION;
+const bool is_static = STATIC;
 
 /* Constants needed for argparse */
 static const struct argp_option options[] = {
@@ -23,11 +28,18 @@ static const struct argp_option options[] = {
     {"disk",      'd', "PATH",          0, "Dump on disk", 1},
     {"network",   'n', "ADDRESS",       0, "Dump on remote IP address (default port TCP " STR(DEFAULT_PORT) ")", 1},
     
-    {0, 0, 0, OPTION_DOC, "Behavior options:", 2},
+    {0, 0, 0, OPTION_DOC, "Dump options:", 2},
     {"fatal",     'f', 0,               0, "Interrupt the dump in case of memory read error", 2},
-    {"port",      'p', "PORT",               0, "Remote IP destination port", 2},
+    {"port",      'p', "PORT",          0, "Remote IP destination port", 2},
     {"raw",       'w', 0,               0, "Produce a RAW dump instead of a LiME one", 2},
     
+    {0, 0, 0, OPTION_DOC, "Advanced options:", 3},
+    {"debug",     'g', 0,              0, "Enable debug prints ", 3},
+    {"xdp",       'x', 0,               0, "Force the use of XDP instead UPROBE as eBPF trigger", 3},
+    {"iomem_user",'u', 0,               0, "Force the read of /proc/iomem instead of kernel struct resource ", 3},
+    {"dryrun",    'y', 0,               0, "Simulate a dump (not read the physical memory)", 3},
+    {"huge",      'H', 0,               0, "Use huge pages (2MB) instead of 4KB", 3},
+
     {0}
 };
 static const char doc[] = "LEMON - An eBPF Memory Dump Tool for x64 and ARM64 Linux and Android";
@@ -89,6 +101,26 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
         case 'w':
             opts->raw = true;
             break;
+        
+        case 'y':
+            opts->simulate = true;
+            break;
+        
+        case 'x':
+            opts->force_xdp = true;
+            break;
+
+        case 'u':
+            opts->force_iomem_user = true;
+            break;
+        
+        case 'g':
+            opts->debug = true;
+            break;
+
+        case 'H':
+            opts->use_huge_pages = true;
+            break;
 
         case ARGP_KEY_END:
             /* Ensure at least one mode is specified */
@@ -109,48 +141,183 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
  *   0 if kernel version does not support all the features
  *   < 0 on failure
  */
-static int check_kernel_version() {
+static int check_kernel_version(struct lemon_ctx *restrict ctx) {
     struct utsname buffer;
     int major = 0, minor = 0, patch = 0;
 
     if (uname(&buffer) != 0) {
-        perror("Fail to get Linux kernel version");
+        ERRNO("Fail to get Linux kernel version");
         return -errno;
     }
     sscanf(buffer.release, "%d.%d.%d", &major, &minor, &patch);
     if(errno) {
-        perror("Fail to parse Linux version");
+        ERRNO("Fail to parse Linux version");
         return -errno;
     }
+    DBG("Kernel version: %d.%d.%d", major, minor, patch);
+
+    memcpy(&ctx->kern_info, &buffer, sizeof(struct utsname));
 
     return (major > MIN_MAJOR_LINUX) || ((major == MIN_MAJOR_LINUX) && (minor >= MIN_MINOR_LINUX));
 }
 
-int main(int argc, char **argv) {
-    struct ram_regions ram_regions;
-    struct options opts = {0};
-    struct argp argp = {options, parse_opt, "", doc};
-    int ret = EXIT_SUCCESS;
+/**
+ * Get an Android system property by running:
+ *   getprop <name>
+ * and capturing stdout.
+ *
+ * Returns 1 on success, 0 on failure.
+ * Output is stored in 'value' (null-terminated, trimmed of newline).
+ */
+static int getprop_cmd(const struct lemon_ctx *restrict ctx, char *name, char *value, size_t value_size)
+{
+    char cmd[256];
+    char buf[256];
+
+    if (!name || !value || value_size == 0)
+        return 1;
+
+    /* Build the command string */
+    snprintf(cmd, sizeof(cmd), "getprop %s", name);
+
+    FILE *fp = popen(cmd, "r");
+    if (!fp)
+        return 1;
+
+    /* Read first line of output */
+    if (!fgets(buf, sizeof(buf), fp)) {
+        pclose(fp);
+        return 1;
+    }
+    pclose(fp);
+
+    /* Strip trailing newline */
+    size_t len = strlen(buf);
+    if (len > 0 && buf[len - 1] == '\n')
+        buf[len - 1] = '\0';
+
+    /* Empty string means property doesn't exist */
+    if (buf[0] == '\0')
+        return 1;
+
+    strncpy(value, buf, value_size - 1);
+    value[value_size - 1] = '\0';
+
+    DBG("getprop_cmd %s: %s", name, value);
+
+    return 0;
+}
+
+/* Look for mandatory android */
+static int collect_android_info(struct lemon_ctx *restrict ctx) {
+    ctx->is_android = access("/system/bin/getprop", X_OK) == 0 || access("/vendor/bin/getprop", X_OK) == 0;
+    DBG("Android: %d", ctx->is_android);
+    if(!ctx->is_android)
+        return 0;
+
+    /* Extract Android related info */
+    if(
+        getprop_cmd(ctx, "ro.product.manufacturer", ctx->manufacturer, MAX_INFO_FIELD) ||
+        getprop_cmd(ctx, "ro.product.model", ctx->model, MAX_INFO_FIELD) || 
+        getprop_cmd(ctx, "ro.soc.manufacturer", ctx->soc_manufacturer, MAX_INFO_FIELD) ||
+        getprop_cmd(ctx, "ro.soc.model", ctx->soc_model, MAX_INFO_FIELD) ||
+        getprop_cmd(ctx, "ro.build.fingerprint", ctx->soc_model, MAX_INFO_FIELD))
+        return 1;
+    
+    return 0;
+}
+
+static int init_context(struct lemon_ctx *restrict ctx) {
+    /* Initialize the context the context */
+    memset(ctx, 0x00, sizeof(struct lemon_ctx));
+
+    /* Set default values */
+    ctx->opts.dump_mode = MODE_UNDEFINED;
+    ctx->opts.port = DEFAULT_PORT;
+    ctx->original_kptr = -1;
+
+    return 0;
+}
+
+static int collect_system_info(struct lemon_ctx *restrict ctx) {
+    /* Collect system info*/
+    int ret;
+
+    /* Set granule size for dump */
+    if(ctx->opts.use_huge_pages)
+        ctx->granule = HUGE_PAGE_SIZE;
+    else
+        ctx->granule = PAGE_SIZE;
+ 
+    /* Init Android fields */
+    if((ret = collect_android_info(ctx))) {
+        ERR("Error in Android init function");
+        return ret;
+    }
+
+    /* Get process capabilities */
+    ctx->capabilities = cap_get_proc();
+    if (ctx->capabilities == NULL) {
+        ERRNO("Fail to get process capabilities");
+        return errno;
+    }
 
     /* Check if is running as root */
     if(getuid() != 0) {
-        WARN("LEMON is not running as root.");
+        WARN("LEMON is not running as root. Try to continue anyway...");
     }
+    ctx->run_as_root = true;
 
     /* Check Linux version */
-    if(check_kernel_version() != 1) {
-        WARN("Detected Linux version is not supported by LEMON. Minimum required version: %d.%d", MIN_MAJOR_LINUX, MIN_MINOR_LINUX);
+    if(check_kernel_version(ctx) != 1) {
+        WARN("Detected Linux version is not supported by LEMON. Minimum required version: %d.%d. Try to continue anyway...", MIN_MAJOR_LINUX, MIN_MINOR_LINUX);
     }
 
     /* Check if can load eBPF programs */
-    if((check_capability(CAP_BPF) <= 0) && (check_capability(CAP_SYS_ADMIN) <= 0)) {
-        WARN("LEMON does not have CAP_BPF nor CAP_SYS_ADMIN to load the eBPF component");
+    if((check_capability(ctx, CAP_BPF) <= 0) && (check_capability(ctx, CAP_SYS_ADMIN) <= 0)) {
+        WARN("LEMON does not have CAP_BPF nor CAP_SYS_ADMIN to load the eBPF component. Try to continue anyway...");
+    }
+
+    return 0;
+}
+
+static int cleanup_context(struct lemon_ctx *restrict ctx) {
+    int ret = 0;
+    
+    if(ctx->capabilities) {
+        if((ret = cap_free(ctx->capabilities))) {
+            ERRNO("Fail to free capabilities struct");
+            return errno;
+        };
+    }
+
+    return ret;
+}
+
+int main(int argc, char **argv) {
+    struct lemon_ctx ctx;
+    struct argp argp = {options, parse_opt, "", doc};
+    int ret = EXIT_SUCCESS;
+
+    /* Init the main context */
+    if(init_context(&ctx)) {
+        ERR("Failed to initialize main context");
+        return EXIT_FAILURE;
+    }
+
+    /* Parse the arguments */
+    argp_parse(&argp, argc, argv, 0, 0, &ctx.opts);
+
+    /* Collect system info */
+    if(collect_system_info(&ctx)) {
+        ERR("Failed to collect system info");
+        return EXIT_FAILURE;
     }
 
     /* Check for eBPF support */
     bpf_prog_load(BPF_PROG_TYPE_UNSPEC, NULL, NULL, NULL, 0, NULL);
 	if(errno == ENOSYS) {
-        fprintf(stderr, "eBPF not supported by this kernel");
+        ERR("eBPF not supported by this kernel");
         return EXIT_FAILURE;
     }
 
@@ -158,33 +325,32 @@ int main(int argc, char **argv) {
         /* Check for eBPF CORE support */
         struct btf *vmlinux_btf = btf__load_vmlinux_btf();
         if (!vmlinux_btf) {
-            fprintf(stderr, "eBPF CO-RE not supported by this kernel. Try to use no CO-RE version.");
+            ERR("eBPF CO-RE not supported by this kernel. Try to use no CO-RE version.");
             return EXIT_FAILURE;
         }
         btf__free(vmlinux_btf);
+        ctx.is_core_supported = true;
     #endif
 
-    /* Parse the arguments */
-    opts.port = DEFAULT_PORT;
-    argp_parse(&argp, argc, argv, 0, 0, &opts);
-
     /* Load eBPF progs that read memory */
-    if((ret = load_ebpf_mem_progs())) return ret;
+    if((ret = load_ebpf_mem_progs(&ctx))) return ret;
 
     /* Disable kptr_restrict if needed */
-    if((ret = toggle_kptr())) return ret;
+    if((ret = toggle_kptr(&ctx))) return ret;
 
     /* Determine the memory dumpable regions */
-    if((ret = init_translation(&ram_regions))) goto cleanup;
+    if((ret = init_translation(&ctx))) goto cleanup;
 
     /* Dump on a file */
-    if(opts.dump_mode == MODE_DISK) {
-        if((ret = dump_on_disk(&opts, &ram_regions))) goto cleanup;
+    if(ctx.opts.dump_mode == MODE_DISK) {
+        INFO("Start dump on disk");
+        if((ret = dump_on_disk(&ctx))) goto cleanup;
     }
 
     /* Dump using TCP packets */
-    else if(opts.dump_mode == MODE_NETWORK) { 
-        if((ret = dump_on_net(&opts, &ram_regions))) goto cleanup;
+    else if(ctx.opts.dump_mode == MODE_NETWORK) {
+        INFO("Start dump over network");
+        if((ret = dump_on_net(&ctx))) goto cleanup;
     }
 
     /* Cleanup: close BPF object */
@@ -192,7 +358,9 @@ int main(int argc, char **argv) {
         cleanup_mem_ebpf();
 
         /* Restore kptr_restrict if needed */
-        if((ret = toggle_kptr())) return ret;
+        if((ret = toggle_kptr(&ctx))) return ret;
+
+        cleanup_context(&ctx);
 
     return ret; // TODO rework all the ret values handling
 }

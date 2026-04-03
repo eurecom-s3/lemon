@@ -1,10 +1,11 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <string.h>
 
 #include "lemon.h"
 
-extern int dump(const struct options *restrict opts, const struct ram_regions *restrict ram_regions, int (*write_f)(void *restrict, const void *restrict, const unsigned long), void *restrict args);
+extern int dump(const struct lemon_ctx *restrict ctx, int (*write_f)(void *restrict, const void *restrict, const unsigned long), void *restrict args);
 
 /* Arguments passed to write_on_socket() */
 struct net_args {
@@ -29,7 +30,7 @@ int write_on_socket(void *restrict args, const void *restrict data, const unsign
             r = write(net_args->sockfd, data + total, size - total);
             if(r == -1) {
                 if(errno == EINTR) continue;
-                perror("Fail to write on socket");
+                ERRNO("Fail to write on socket");
                 return errno;
             }
             
@@ -46,7 +47,7 @@ int write_on_socket(void *restrict args, const void *restrict data, const unsign
  *
  * On success, it returns 0. On failure, a negative value or errno is returned.
  */
-int dump_on_net(const struct options *restrict opts, const struct ram_regions *restrict ram_regions) {
+int dump_on_net(const struct lemon_ctx *restrict ctx) {
     int sockfd;
     struct sockaddr_in dest_addr;
     struct net_args net_args;
@@ -55,18 +56,18 @@ int dump_on_net(const struct options *restrict opts, const struct ram_regions *r
     /* Create socket */
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) {
-        perror("Fail to open network socket");
+        ERRNO("Fail to open network socket");
         return errno;
     }
 
     /* Setup destination address */
     dest_addr.sin_family = AF_INET;
-    dest_addr.sin_port = htons(opts->port);
-    dest_addr.sin_addr.s_addr = opts->address;
+    dest_addr.sin_port = htons(ctx->opts.port);
+    dest_addr.sin_addr.s_addr = ctx->opts.address;
 
     /* Connect to the destination */
     if ((ret = connect(sockfd, (struct sockaddr *)&dest_addr, sizeof(dest_addr))) < 0) {
-        perror("Fail to connect to remote host");
+        ERRNO("Fail to connect to remote host");
         return errno;
     }
 
@@ -74,10 +75,10 @@ int dump_on_net(const struct options *restrict opts, const struct ram_regions *r
     net_args.sockfd = sockfd;
 
     /* Dump! */
-    ret = dump(opts, ram_regions, write_on_socket, (void *)&net_args);
+    ret = dump(ctx, write_on_socket, (void *)&net_args);
 
     if(sockfd) {
-        if(close(sockfd)) { perror("Fail to close the connection"); ret = errno; }
+        if(close(sockfd)) { ERRNO("Fail to close the connection"); ret = errno; }
     }
     
     return ret;
