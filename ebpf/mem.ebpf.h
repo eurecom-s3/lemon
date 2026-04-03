@@ -16,4 +16,8 @@ struct read_mem_args {
     unsigned long size;
 };
 
+struct config_values {
+    int CONFIG_ARM64_VA_BITS;
+};
+
 #endif /* MEM_EBPF_H */

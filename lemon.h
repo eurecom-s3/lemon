@@ -108,6 +108,7 @@ struct lemon_ctx {
 
     int original_kptr;
     unsigned long va_bits;
+    unsigned long va_bits_config;
 
     /* Offset used to perform physical to virtual address translation in x86 and ARM64 */
     #ifdef __TARGET_ARCH_x86

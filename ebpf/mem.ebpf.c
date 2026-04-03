@@ -39,16 +39,8 @@ struct {
     __uint(map_flags, BPF_F_MMAPABLE | BPF_F_NUMA_NODE);
 } read_mem_array_map SEC(".maps");
 
-/* VA bits for ARM64 
- *
- * Try to get the va bits from the kernel config.
- * Otherwise we try to compute the actual va bits (runtime) in userspace and inject it here on eBPF
- * program open.
- */
-#ifdef __TARGET_ARCH_arm64
-    extern unsigned long CONFIG_ARM64_VA_BITS __kconfig __weak;
-    unsigned long runtime_va_bits SEC(".data");
-#endif
+extern unsigned long CONFIG_ARM64_VA_BITS __kconfig __weak; /* VA bits for ARM64 */
+__attribute__((used)) static void __keep_config_syms(void) { asm volatile("" : : "m"(CONFIG_ARM64_VA_BITS) : "memory"); } /* WORKAROUND for LLVM */
 
 /*
  * read_memory() - Read kernel memory and save the content in the eBPF map
@@ -72,15 +64,6 @@ static int inline read_memory(__u64 address, const __u64 dump_size) {
         read_mem_result->ret_code = -EINVAL;
         return 0;
     }
-
-    /* ARM64 phys to virt offset depends also on virtual addresses number of bits */
-    #ifdef __TARGET_ARCH_arm64
-        if (CONFIG_ARM64_VA_BITS != 0) {
-            address |= 0xffffffffffffffff << CONFIG_ARM64_VA_BITS;
-        } else {
-            address |= 0xffffffffffffffff << runtime_va_bits;
-        }
-    #endif
 
     /* Ensure parameters are sanitized (some checks are needed to bypass eBPF type checking) */
     #ifdef __TARGET_ARCH_x86

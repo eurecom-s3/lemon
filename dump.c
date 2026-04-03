@@ -34,7 +34,7 @@ static int dump_region(const struct lemon_ctx *restrict ctx, uintptr_t region_st
         chunk_size = chunk_end - chunk_start + 1;
 
         if ((ret = read_kernel_memory(phys_to_virt(ctx, chunk_start), chunk_size, &read_data))) {
-            ERR("Error reading kernel physical memory. Physical address: 0x%lx, size: 0x%zx. Error code: %d\n", chunk_start, chunk_size, ret);
+            ERR("Error reading physical address 0x%lx (0x%lx) size: 0x%zx. Error code: %d", chunk_start, phys_to_virt(ctx, chunk_start), chunk_size, ret);
             
             /* Error reading memory, abort the dump or try with minimum granule of the system */
             if(ctx->opts.fatal) return ret;
@@ -49,7 +49,7 @@ static int dump_region(const struct lemon_ctx *restrict ctx, uintptr_t region_st
             else memset(read_data, 0x00, chunk_size); /* We are already at the minimum granule, replace with 0x00 */
         }
 
-        DBG("Read 0x%lx (0x%lx) Size 0x%lx completed", chunk_start, phys_to_virt(ctx, chunk_start), chunk_size);
+        // DBG("Read 0x%lx (0x%lx) Size 0x%lx completed", chunk_start, phys_to_virt(ctx, chunk_start), chunk_size);
 
         /* Save the chunk */
         if ((ret = write_f(args, read_data, chunk_size)) < 0) {

@@ -163,7 +163,10 @@ static int init_udp_socket() {
  * Returns 0 on success or a negative error code on failure.
  */
 int load_ebpf_mem_progs(struct lemon_ctx *restrict ctx) {
-    int ret;
+    int ret, map_fd, key;
+    struct bpf_map *kconfig_map;
+    struct config_values cfg_vals;
+    unsigned long vabits;
 
     /* Check if we have sufficient capabilities to set RLIMIT_MEMLOCK (required by libbpf...)*/
     if((check_capability(ctx, CAP_PERFMON) <= 0) && (check_capability(ctx, CAP_SYS_ADMIN) <= 0)) {
@@ -177,24 +180,42 @@ int load_ebpf_mem_progs(struct lemon_ctx *restrict ctx) {
         return -errno;
     }
 
-    /* ARM64 phys to virt translation requires two values, one of the two (CONFIG_ARM64_VA_BITS)
-     * might not be available from eBPF so we try to compute it at runtime here and we pass it to
-     * eBPF.
-     */
-    #if defined(__TARGET_ARCH_arm64)
-        unsigned long vabits = arm64_vabits_actual();
-        if (vabits == 0) {
-            WARN("Failed to determine runtime virtual address bits, defaulting to 48");
-            vabits = 48;
-        }
-        mem_ebpf_skel->data->runtime_va_bits = vabits;
-    #endif
-
     /* Load the BPF objectes */
     if (mem_ebpf__load(mem_ebpf_skel)) {
         ERRNO("Failed to load BPF object");
         return -errno;
     }
+
+    /* ARM64 phys to virt translation requires two values, one of the two (CONFIG_ARM64_VA_BITS)
+     * might not be available from config.gz so we try to compute it at runtime
+     */
+    #if defined(__TARGET_ARCH_arm64)
+        key = 0;
+        vabits = 39;
+        kconfig_map = bpf_object__find_map_by_name(mem_ebpf_skel->obj, ".kconfig");
+        if(!kconfig_map || \
+           ((map_fd = bpf_map__fd(kconfig_map)) < 0) || \
+           (bpf_map_lookup_elem(map_fd, &key, &cfg_vals))) {
+            WARN("No .kconfig section in eBPF program");
+            goto estimate;
+        }
+
+        ctx->va_bits_config = cfg_vals.CONFIG_ARM64_VA_BITS;
+        DBG("CONFIG_ARM64_VA_BITS %lu", ctx->va_bits_config);
+        if(ctx->va_bits_config)
+            ctx->va_bits = ctx->va_bits_config;
+        else {
+            estimate:
+                vabits = arm64_vabits_actual();
+                if (vabits == 0) {
+                    WARN("Failed to determine runtime virtual address bits, defaulting to 48");
+                    vabits = 48;
+                }
+                DBG("Estimated va_bits %lu", vabits);
+                ctx->va_bits = vabits;
+        }
+        DBG("va_bits %lu", ctx->va_bits);
+    #endif
 
     /* Attach the uprobe to the 'read_kernel_memory' function in the current executable */
     bpf_prog_link = bpf_program__attach(mem_ebpf_skel->progs.read_kernel_memory_uprobe);
@@ -268,10 +289,11 @@ void cleanup_mem_ebpf() {
  * Currently supports x86_64 and ARM64 only.
  */
 uintptr_t phys_to_virt(const struct lemon_ctx *restrict ctx, const uintptr_t phy_addr) {
+
     #ifdef __TARGET_ARCH_x86
         return phy_addr + ctx->v2p_offset;
     #elif __TARGET_ARCH_arm64
-        return phy_addr - ctx->v2p_offset;
+        return (phy_addr - ctx->v2p_offset) | (0xffffffffffffffff << ctx->va_bits);
     #else
         return phy_addr;
     #endif

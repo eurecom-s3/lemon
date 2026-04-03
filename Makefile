@@ -63,8 +63,8 @@ all: clean $(if $(filter 1,$(NEEDS_VMLINUX)), vmlinux) $(BPF_OBJ) $(LOADER_BIN)
 # Build eBPF object and generate skeleton
 $(BPF_OBJ): $(BPF_SRC)
 	$(CLANG) -std=gnu17 -target bpf -D$(TARGET_ARCH) $(BPF_FLAGS) -I/usr/include/linux -I/usr/include/$(ARCH)-linux-gnu \
-		-Wall -O2 -g -c $< -o $@
-	llvm-strip -g $(BPF_OBJ)
+		-Wall -O2 -g  -c $< -o $@
+	llvm-strip --keep-symbol=CONFIG_ARM64_VA_BITS -g $(BPF_OBJ)
 	$(BPFTOOL) gen skeleton $(BPF_OBJ) > $(BPF_SKEL)
 
 # Build the loader (compiled before eBPF program)
