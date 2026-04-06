@@ -27,7 +27,7 @@ VERSION := $(shell git describe --tags)
 
 # Define compiler and flags
 CLANG := clang
-CFLAGS := -std=gnu17 -Wall -O2 -D$(TARGET_ARCH) -DARCH=\"$(ARCH)\" -DBRANCH=\"$(BRANCH)\" -DVERSION=\"$(VERSION)\" -DMODE=\"$(MODE)\" -DSTATIC=\"$(STATIC)\" 
+CFLAGS := -std=gnu17 -Wall -O2 -D$(TARGET_ARCH) -DARCH=\"$(ARCH)\" -DBRANCH=\"$(BRANCH)\" -DVERSION=\"$(VERSION)\" -DMODE=\"$(MODE)\" -DSTATIC=$(if $(filter 1,$(STATIC)),1,0)
 LDFLAGS := -lbpf -lelf -lz -lzstd -lcap
 
 # MODE-based flags
@@ -51,7 +51,7 @@ ifeq ($(STATIC), 1)
 endif
 
 # Files
-LOADER_SRCS := lemon.c mem.c dump.c disk.c net.c capabilities.c iomem.c
+LOADER_SRCS := lemon.c mem.c dump.c disk.c net.c capabilities.c iomem.c socs/qcom.c
 LOADER_BIN := lemon.$(MODE).$(ARCH)
 BPF_SRC := ebpf/mem.ebpf.c
 BPF_OBJ := ebpf/mem.ebpf.o
@@ -64,7 +64,7 @@ all: clean $(if $(filter 1,$(NEEDS_VMLINUX)), vmlinux) $(BPF_OBJ) $(LOADER_BIN)
 $(BPF_OBJ): $(BPF_SRC)
 	$(CLANG) -std=gnu17 -target bpf -D$(TARGET_ARCH) $(BPF_FLAGS) -I/usr/include/linux -I/usr/include/$(ARCH)-linux-gnu \
 		-Wall -O2 -g  -c $< -o $@
-	llvm-strip --keep-symbol=CONFIG_ARM64_VA_BITS -g $(BPF_OBJ)
+	llvm-strip --keep-symbol=CONFIG_ARM64_VA_BITS --keep-symbol=CONFIG_SPARSEMEM_VMEMMAP -g $(BPF_OBJ)
 	$(BPFTOOL) gen skeleton $(BPF_OBJ) > $(BPF_SKEL)
 
 # Build the loader (compiled before eBPF program)

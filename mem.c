@@ -11,6 +11,7 @@
 
 extern int check_capability(const struct lemon_ctx *restrict ctx, const cap_value_t cap);
 extern int parse_iomem(struct lemon_ctx *restrict ctx);
+struct mem_range *range_new(unsigned long long start, unsigned long long end, bool virtual);
 
 
 /* eBPF memory read program skeleton */
@@ -118,7 +119,7 @@ static int init_mmap() {
  * Returns 0 on success, negative errno value on failure.
  */
 static int init_udp_socket() {
-    struct sockaddr_in local_addr;
+    // struct sockaddr_in local_addr;
 
     /* Create UDP socket */
     udp_sockfd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -127,11 +128,11 @@ static int init_udp_socket() {
         return -errno;
     }
 
-    /* Setup local address structure for binding*/
-    memset(&local_addr, 0, sizeof(local_addr));
-    local_addr.sin_family = AF_INET;
-    local_addr.sin_addr.s_addr = INADDR_ANY;
-    local_addr.sin_port = 0;
+    // /* Setup local address structure for binding*/
+    // memset(&local_addr, 0, sizeof(local_addr));
+    // local_addr.sin_family = AF_INET;
+    // local_addr.sin_addr.s_addr = INADDR_ANY;
+    // local_addr.sin_port = 0;
 
     return 0;
 }
@@ -143,10 +144,14 @@ static int init_udp_socket() {
  * Returns 0 on success or a negative error code on failure.
  */
 int load_ebpf_mem_progs(struct lemon_ctx *restrict ctx) {
-    int ret, map_fd, key;
-    struct bpf_map *kconfig_map;
-    struct config_values cfg_vals;
-    unsigned long vabits;
+    int ret;
+
+    #if defined(__TARGET_ARCH_arm64)
+        unsigned long vabits = 0;    
+        int map_fd, key;
+        struct bpf_map *kconfig_map;
+        struct config_values cfg_vals;
+    #endif
 
     /* Check if we have sufficient capabilities to set RLIMIT_MEMLOCK (required by libbpf...)*/
     if((check_capability(ctx, CAP_PERFMON) <= 0) && (check_capability(ctx, CAP_SYS_ADMIN) <= 0)) {
@@ -171,7 +176,6 @@ int load_ebpf_mem_progs(struct lemon_ctx *restrict ctx) {
      */
     #if defined(__TARGET_ARCH_arm64)
         key = 0;
-        vabits = 39;
         kconfig_map = bpf_object__find_map_by_name(mem_ebpf_skel->obj, ".kconfig");
         if(!kconfig_map || \
            ((map_fd = bpf_map__fd(kconfig_map)) < 0) || \
@@ -180,6 +184,7 @@ int load_ebpf_mem_progs(struct lemon_ctx *restrict ctx) {
             goto estimate;
         }
 
+        ctx->sparsemem_vmap_config = cfg_vals.CONFIG_SPARSEMEM_VMEMMAP;
         ctx->va_bits_config = cfg_vals.CONFIG_ARM64_VA_BITS;
         DBG("CONFIG_ARM64_VA_BITS %lu", ctx->va_bits_config);
         if(ctx->va_bits_config)
@@ -199,12 +204,12 @@ int load_ebpf_mem_progs(struct lemon_ctx *restrict ctx) {
 
     /* Attach the uprobe to the 'read_kernel_memory' function in the current executable */
     bpf_prog_link = bpf_program__attach(mem_ebpf_skel->progs.read_kernel_memory_uprobe);
-    if (bpf_prog_link && !ctx->opts.force_xdp) {
+    if (bpf_prog_link && !libbpf_get_error(bpf_prog_link) && !ctx->opts.force_xdp) {
         ctx->ebpf_trigger = UPROBE;
     } 
     else {
         ctx->ebpf_trigger = XDP;
-        fprintf(stderr, "Failed to attach eBPF Uprobe program, use XDP fallback...\n");
+        INFO("Dump using XDP as eBPF trigger");
         
         /* Get loopback interface index by name "lo" (usually 1) */
         int ifindex = if_nametoindex(loopback_interface);
@@ -253,7 +258,7 @@ void cleanup_mem_ebpf() {
     }
 
     /* Close UDP socket if it's open */
-    if (udp_sockfd > 0) {
+    if (udp_sockfd >= 0) {
         close(udp_sockfd);
         udp_sockfd = -1;
     }
@@ -326,9 +331,8 @@ static int send_udp_trigger_packet(const uintptr_t addr, const size_t size) {
  * The function is marked with `noinline` and `optnone` to ensure the code is not optimized or inlined by the compiler.
  */
 int __attribute__((noinline, optnone)) read_kernel_memory(const uintptr_t addr, const size_t size, __u8 **restrict data) {
-    // ctx->opts.simulate!
     /* If the Uprobe support is not active in kernel, use XDP to read the memory*/
-    if(udp_sockfd > 0) {
+    if(udp_sockfd >= 0) {
         int ret;
 
         /* Send UDP trigger packet for XDP*/
@@ -356,11 +360,12 @@ static int inline parse_kallsyms_line(const char *restrict line, const char *res
     char current_symb_name[256];
 
     /* Read the address and check if the it is the symbol that we look for */
-    if ((sscanf(line, "%lx %*c %255s\n", current_symb_addr, current_symb_name) != 2) || strncmp(current_symb_name, symbol, strlen(symbol)))
+    if ((sscanf(line, "%lx %*c %255s\n", current_symb_addr, current_symb_name) != 2) || strcmp(current_symb_name, symbol)) {
         return 0;
+    }
 
     /* Check that address is not 0 */
-    return current_symb_addr != 0;
+    return *current_symb_addr != 0;
 }
 
 /*
@@ -405,7 +410,7 @@ static int parse_kallsyms(struct lemon_ctx *restrict ctx) {
     while (fgets(line, sizeof(line), fp)) {
 
         /* Check if all the symbols are already found */
-        if(ctx->iomem_resource && ctx->v2p_offset) break;
+        if(ctx->iomem_resource && ctx->v2p_offset && ctx->mem_section) break;
 
         /* Look for symbols */
         if(!ctx->iomem_resource && parse_kallsyms_line(line, "iomem_resource", &current_symb_addr)) {
@@ -427,6 +432,14 @@ static int parse_kallsyms(struct lemon_ctx *restrict ctx) {
             DBG("v2p_offset 0x%lx", ctx->v2p_offset);
             continue;
         }
+        
+        /* Address of mem_section array needed to find struct page array (vmemmap) for Qualcomm quirks */
+        if(!ctx->mem_section && parse_kallsyms_line(line, "mem_section", &current_symb_addr)) {
+            ctx->mem_section = current_symb_addr;
+            DBG("mem_section 0x%lx", ctx->mem_section);
+            continue;
+        }
+
     }
 
     if(fclose(fp)) {
@@ -532,12 +545,20 @@ static int parse_kallsyms(struct lemon_ctx *restrict ctx) {
  */
 int init_translation(struct lemon_ctx *restrict ctx) {
     int err;
+    struct mem_range *n;
 
     /* Parse kallsyms looking for symbols needed to initialize translatation system */
     if((err = parse_kallsyms(ctx))) return err;
 
-    /* Obtain the list of physical memory to be dumped */
-    err = parse_iomem(ctx);
+    /* If a memory range is passed use that one */
+    if(ctx->opts.force_dump_range) {
+        n = range_new(ctx->opts.forced_range.start, ctx->opts.forced_range.end, ctx->opts.forced_range.virtual);
+        if (n) TAILQ_INSERT_TAIL(&ctx->ram_regions, n, entries);
+    }
+    else {
+        /* Obtain the list of physical memory to be dumped */
+        err = parse_iomem(ctx);
+    }
 
     return err;
 

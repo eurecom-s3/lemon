@@ -27,6 +27,7 @@
 #include <bpf/bpf_helpers.h>
 #include <bpf/bpf_tracing.h>
 #include <bpf/bpf_endian.h>
+#include <stdbool.h>
 
 #include "mem.ebpf.h"
 
@@ -36,11 +37,15 @@ struct {
     __type(key, int);
     __type(value, struct read_mem_result);
     __uint(max_entries, 1);
-    __uint(map_flags, BPF_F_MMAPABLE | BPF_F_NUMA_NODE);
+    __uint(map_flags, BPF_F_MMAPABLE);
 } read_mem_array_map SEC(".maps");
 
 extern unsigned long CONFIG_ARM64_VA_BITS __kconfig __weak; /* VA bits for ARM64 */
-__attribute__((used)) static void __keep_config_syms(void) { asm volatile("" : : "m"(CONFIG_ARM64_VA_BITS) : "memory"); } /* WORKAROUND for LLVM */
+extern bool CONFIG_SPARSEMEM_VMEMMAP __kconfig __weak; /* Sparsemem VMEMMAP array configuration  */
+__attribute__((used)) static void __keep_config_syms(void) {  /* WORKAROUND for LLVM */
+    asm volatile("" : : "m"(CONFIG_ARM64_VA_BITS) : "memory");
+    asm volatile("" : : "m"(CONFIG_SPARSEMEM_VMEMMAP) : "memory"); 
+}
 
 /*
  * read_memory() - Read kernel memory and save the content in the eBPF map
@@ -51,7 +56,7 @@ __attribute__((used)) static void __keep_config_syms(void) { asm volatile("" : :
  * Returns 0 on success or parameter validation failure, and -1 if the BPF map is unavailable.
  * Return also a specific error code in the map.
  */
-static int inline read_memory(__u64 address, const __u64 dump_size) {
+static inline int read_memory(__u64 address, const __u64 dump_size) {
     /* Get the map in which save the memory content to pass to userspace */
     int key = 0;
     struct read_mem_result *read_mem_result = bpf_map_lookup_elem(&read_mem_array_map, &key);
@@ -60,7 +65,7 @@ static int inline read_memory(__u64 address, const __u64 dump_size) {
     }
 
     /* Validate dump size */
-    if(dump_size > HUGE_PAGE_SIZE) {
+    if (dump_size < 0 || dump_size > HUGE_PAGE_SIZE) {
         read_mem_result->ret_code = -EINVAL;
         return 0;
     }
@@ -74,11 +79,6 @@ static int inline read_memory(__u64 address, const __u64 dump_size) {
         if(true){
     #endif
     
-        read_mem_result->ret_code = -EINVAL;
-        return 0;
-    }
-
-    if (dump_size < 0 || dump_size > HUGE_PAGE_SIZE) {
         read_mem_result->ret_code = -EINVAL;
         return 0;
     }
@@ -187,7 +187,7 @@ int read_kernel_memory_xdp(struct xdp_md* ctx) {
         return XDP_DROP;
     }
 
-    return XDP_PASS;
+    return XDP_DROP;
 }
 
 char _license[] SEC("license") = "GPL";

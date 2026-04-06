@@ -45,6 +45,14 @@ enum ebpf_trigger {
     XDP
 };
 
+struct mem_range {
+    TAILQ_ENTRY(mem_range) entries;
+    bool virtual;
+    unsigned long long start;
+    unsigned long long end;
+};
+TAILQ_HEAD(ram_regions, mem_range);
+
 struct options {
     
     /* Modes */
@@ -70,17 +78,13 @@ struct options {
         unsigned int simulate: 1;
         unsigned int force_xdp: 1;
         unsigned int force_iomem_user: 1;
-        unsigned int use_huge_pages:1 ;
+        unsigned int use_huge_pages:1;
+        unsigned int force_qualcomm:1;
+        unsigned int force_dump_range:1;
     };
-};
 
-struct mem_range {
-    TAILQ_ENTRY(mem_range) entries;
-    unsigned long long start;
-    unsigned long long end;
+    struct mem_range forced_range;
 };
-TAILQ_HEAD(ram_regions, mem_range);
-
 
 typedef struct __attribute__((packed)) {
     unsigned int magic;
@@ -100,6 +104,8 @@ struct lemon_ctx {
         unsigned int run_as_root: 1;
         unsigned int is_android: 1;
         unsigned int is_core_supported: 1;
+        unsigned int sparsemem_vmap_config:1;
+        unsigned int is_qualcomm:1;
     };
     enum ebpf_trigger ebpf_trigger;
 
@@ -122,6 +128,7 @@ struct lemon_ctx {
     #elif __TARGET_ARCH_arm64
         int64_t v2p_offset;
     #endif
+    uintptr_t mem_section;
 
     // TODO: Add SELinux context info
     // TODO: when qualcomm and other sok NO HUGE PAGE

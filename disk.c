@@ -17,7 +17,7 @@ extern int check_capability(const struct lemon_ctx *restrict ctx, const cap_valu
  * @size: Number of bytes to write
  */
 static int write_on_disk(void *restrict args, const void *restrict data, const unsigned long size) {
-    unsigned long r = 0;
+    ssize_t r = 0;
     unsigned long total = 0;
 
     while(total < size) {

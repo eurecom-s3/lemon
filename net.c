@@ -21,7 +21,7 @@ struct net_args {
  * Returns 0 on success.
  */
 int write_on_socket(void *restrict args, const void *restrict data, const unsigned long size) {
-    unsigned long r;
+    ssize_t r;
     unsigned long total;
     struct net_args *net_args = (struct net_args *)args;
 
@@ -77,7 +77,7 @@ int dump_on_net(const struct lemon_ctx *restrict ctx) {
     /* Dump! */
     ret = dump(ctx, write_on_socket, (void *)&net_args);
 
-    if(sockfd) {
+    if(sockfd >= 0) {
         if(close(sockfd)) { ERRNO("Fail to close the connection"); ret = errno; }
     }
     

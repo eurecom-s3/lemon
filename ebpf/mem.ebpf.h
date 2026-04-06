@@ -12,12 +12,13 @@ struct read_mem_result {
 };
 
 struct read_mem_args {
-    unsigned long long addr; 
+    unsigned long addr; 
     unsigned long size;
 };
 
 struct config_values {
     int CONFIG_ARM64_VA_BITS;
+    bool CONFIG_SPARSEMEM_VMEMMAP;
 };
 
 #endif /* MEM_EBPF_H */

@@ -163,7 +163,7 @@ enum xdp_action {
 typedef __u16 __sum16;
 
 #define ETH_P_IP	0x0800
-#define IPPROTO_UDP 22
+#define IPPROTO_UDP 17
 #define ETH_ALEN	6	
 
 struct ethhdr {
@@ -182,10 +182,8 @@ struct iphdr {
 		__u8	ttl;
 		__u8	protocol;
 		__sum16	check;
-		union {
-			__be32	saddr;
-			__be32	daddr;
-		};
+		__be32	saddr;
+		__be32	daddr;
 };
 
 struct udphdr {

@@ -7,6 +7,7 @@
 #include <sys/utsname.h>
 #include <sys/capability.h>
 #include <sys/queue.h>
+#include <string.h>
 
 #include "lemon.h"
 
@@ -18,10 +19,14 @@ extern int check_capability(const struct lemon_ctx *restrict ctx, const cap_valu
 extern int toggle_kptr(struct lemon_ctx *restrict ctx);
 extern void cleanup_mem_ebpf(void);
 extern void range_list_free(struct ram_regions *list);
+extern int check_init_qualcomm(struct lemon_ctx *restrict ctx);
+
+#define LEMON_VERSION  "lemon-" BRANCH "-" VERSION
+#define LEMON_DOC "LEMON - An eBPF Memory Dump Tool for x64 and ARM64 Linux and Android\nVersion " LEMON_VERSION
 
 const char *architecture = ARCH;
 const char *binary_type = MODE;
-const char *lemon_version = "lemon-" BRANCH "-" VERSION;
+const char *lemon_version = LEMON_VERSION;
 const bool is_static = STATIC;
 
 /* Constants needed for argparse */
@@ -36,15 +41,50 @@ static const struct argp_option options[] = {
     {"raw",       'w', 0,               0, "Produce a RAW dump instead of a LiME one", 2},
     
     {0, 0, 0, OPTION_DOC, "Advanced options:", 3},
-    {"debug",     'g', 0,              0, "Enable debug prints ", 3},
+    {"debug",     'g', 0,               0, "Enable debug prints ", 3},
     {"xdp",       'x', 0,               0, "Force the use of XDP instead UPROBE as eBPF trigger", 3},
     {"iomem_user",'u', 0,               0, "Force the read of /proc/iomem instead of kernel struct resource ", 3},
     {"dryrun",    'y', 0,               0, "Simulate a dump (not read the physical memory)", 3},
     {"huge",      'H', 0,               0, "Use huge pages (2MB) instead of 4KB", 3},
+    {"qcom",      'q', 0,               0, "Force the use of Qualcomm quirks", 3},
+    {"rphy",     'r', "ADDRESS:SIZE",  0, "Dump physical pages range", 3},
+    {"rvirt",    'v', "ADDRESS:SIZE",  0, "Dump virtual pages range", 3},
 
     {0}
 };
-static const char doc[] = "LEMON - An eBPF Memory Dump Tool for x64 and ARM64 Linux and Android";
+static const char doc[] = LEMON_DOC;
+
+/*
+ * parse_mem_range() - Parses an "ADDR:SIZE" string into a mem_range.
+ * @arg:   Input string in the form "ADDR:SIZE" (both values may be decimal or 0x-prefixed hex).
+ * @range: Output mem_range where start = ADDR and end = ADDR + SIZE - 1.
+ *
+ * Returns 0 on success, -1 if the format is invalid or parsing fails.
+ */
+static int parse_mem_range(const bool virtual, const char *arg, struct mem_range *range) {
+    char *sep;
+    char *endptr;
+    unsigned long long addr;
+    unsigned long size;
+
+    sep = strchr(arg, ':');
+    if (!sep)
+        return -1;
+
+    addr = strtoull(arg, &endptr, 0);
+    if (endptr != sep)
+        return -1;
+
+    size = strtoul(sep + 1, &endptr, 0);
+    if (*endptr != '\0' || size == 0)
+        return -1;
+
+    range->start = addr;
+    range->end   = addr + size;
+    range->virtual = virtual;
+
+    return 0;
+}
 
 /*
  * parse_opt() - Argument parser callback for argp
@@ -89,9 +129,6 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
             break;
 
         case 'p':
-            if(opts->dump_mode != MODE_NETWORK) {
-                argp_error(state, "-p can be used only in network dump mode");
-            }
             errno = 0;
             port = strtol(arg, &end, 10);
             if (errno != 0 || *arg == '\0' || *end != '\0' || port < 1 || port > 65535) {
@@ -123,13 +160,33 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
         case 'H':
             opts->use_huge_pages = true;
             break;
+        
+        case 'q':
+            opts->force_qualcomm = true;
+            break;
+
+        case 'r':
+        case 'v':
+            if(parse_mem_range(key == 'v'? true:false, arg, &opts->forced_range))
+                argp_error(state, "Invalid memory range argument");
+            opts->force_dump_range = true;
+            break;
 
         case ARGP_KEY_END:
+            /* Port option is only valid in network dump mode */
+            if(opts->dump_mode != MODE_NETWORK && opts->port != DEFAULT_PORT) argp_error(state, "-p can be used only in network dump mode");
+
             /* Ensure at least one mode is specified */
             if (opts->dump_mode == MODE_UNDEFINED) {
                 argp_error(state, "Either disk mode or network mode must be specified");
             }
+
+            /* Qualcomm quirks is uncompatible with huge page */
+            if (opts->use_huge_pages && opts->force_qualcomm) {
+                argp_error(state, "Qualcomm quirks are not possible using huge pages");
+            }
             break;
+        
         default:
             return ARGP_ERR_UNKNOWN;
     }
@@ -151,10 +208,9 @@ static int check_kernel_version(struct lemon_ctx *restrict ctx) {
         ERRNO("Fail to get Linux kernel version");
         return -errno;
     }
-    sscanf(buffer.release, "%d.%d.%d", &major, &minor, &patch);
-    if(errno) {
-        ERRNO("Fail to parse Linux version");
-        return -errno;
+    if(sscanf(buffer.release, "%d.%d.%d", &major, &minor, &patch) != 3) {
+        ERR("Fail to parse Linux version");
+        return -EINVAL;
     }
     DBG("Kernel version: %d.%d.%d", major, minor, patch);
 
@@ -177,19 +233,19 @@ static int getprop_cmd(const struct lemon_ctx *restrict ctx, char *name, char *v
     char buf[256];
 
     if (!name || !value || value_size == 0)
-        return 1;
+        return -EINVAL;
 
     /* Build the command string */
     snprintf(cmd, sizeof(cmd), "getprop %s", name);
 
     FILE *fp = popen(cmd, "r");
     if (!fp)
-        return 1;
+        return -ENOENT;
 
     /* Read first line of output */
     if (!fgets(buf, sizeof(buf), fp)) {
         pclose(fp);
-        return 1;
+        return -EIO;
     }
     pclose(fp);
 
@@ -200,7 +256,7 @@ static int getprop_cmd(const struct lemon_ctx *restrict ctx, char *name, char *v
 
     /* Empty string means property doesn't exist */
     if (buf[0] == '\0')
-        return 1;
+        return -EINVAL;
 
     strncpy(value, buf, value_size - 1);
     value[value_size - 1] = '\0';
@@ -223,7 +279,7 @@ static int collect_android_info(struct lemon_ctx *restrict ctx) {
         getprop_cmd(ctx, "ro.product.model", ctx->model, MAX_INFO_FIELD) || 
         getprop_cmd(ctx, "ro.soc.manufacturer", ctx->soc_manufacturer, MAX_INFO_FIELD) ||
         getprop_cmd(ctx, "ro.soc.model", ctx->soc_model, MAX_INFO_FIELD) ||
-        getprop_cmd(ctx, "ro.build.fingerprint", ctx->soc_model, MAX_INFO_FIELD))
+        getprop_cmd(ctx, "ro.build.fingerprint", ctx->fingerprint, MAX_INFO_FIELD))
         return 1;
     
     return 0;
@@ -269,7 +325,8 @@ static int collect_system_info(struct lemon_ctx *restrict ctx) {
     if(getuid() != 0) {
         WARN("LEMON is not running as root. Try to continue anyway...");
     }
-    ctx->run_as_root = true;
+    else ctx->run_as_root = true;
+    
 
     /* Check Linux version */
     if(check_kernel_version(ctx) != 1) {
@@ -299,6 +356,13 @@ static int cleanup_context(struct lemon_ctx *ctx) {
     return ret;
 }
 
+static int init_socs_quirks(struct lemon_ctx *ctx) {
+    int ret;
+    if((ret = check_init_qualcomm(ctx)) < 0) return 1;
+
+    return 0;
+}
+
 int main(int argc, char **argv) {
     struct lemon_ctx ctx;
     struct argp argp = {options, parse_opt, "", doc};
@@ -320,8 +384,9 @@ int main(int argc, char **argv) {
     }
 
     /* Check for eBPF support */
-    bpf_prog_load(BPF_PROG_TYPE_UNSPEC, NULL, NULL, NULL, 0, NULL);
-	if(errno == ENOSYS) {
+    errno = 0;
+    int bpf_ret = bpf_prog_load(BPF_PROG_TYPE_UNSPEC, NULL, NULL, NULL, 0, NULL);
+	if(bpf_ret <0 && errno == ENOSYS) {
         ERR("eBPF not supported by this kernel");
         return EXIT_FAILURE;
     }
@@ -338,13 +403,16 @@ int main(int argc, char **argv) {
     #endif
 
     /* Load eBPF progs that read memory */
-    if((ret = load_ebpf_mem_progs(&ctx))) return ret;
+    if((ret = load_ebpf_mem_progs(&ctx))) goto cleanup;
 
     /* Disable kptr_restrict if needed */
-    if((ret = toggle_kptr(&ctx))) return ret;
+    if((ret = toggle_kptr(&ctx))) goto cleanup;
 
     /* Determine the memory dumpable regions */
     if((ret = init_translation(&ctx))) goto cleanup;
+
+    /* Init SoCs quirks */
+    if((ret = init_socs_quirks(&ctx))) goto cleanup;
 
     /* Dump on a file */
     if(ctx.opts.dump_mode == MODE_DISK) {
@@ -363,7 +431,7 @@ int main(int argc, char **argv) {
         cleanup_mem_ebpf();
 
         /* Restore kptr_restrict if needed */
-        if((ret = toggle_kptr(&ctx))) return ret;
+        toggle_kptr(&ctx);
 
         cleanup_context(&ctx);
 

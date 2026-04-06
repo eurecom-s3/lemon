@@ -30,7 +30,7 @@ struct resource {
 extern int check_capability(const struct lemon_ctx *restrict ctx, const cap_value_t cap);
 extern int read_kernel_memory(const uintptr_t addr, const size_t size, unsigned char **restrict data);
 
-static struct mem_range *range_new(unsigned long long start, unsigned long long end) {
+struct mem_range *range_new(unsigned long long start, unsigned long long end, bool virtual) {
     if (start >= end)
         return NULL;
 
@@ -40,6 +40,7 @@ static struct mem_range *range_new(unsigned long long start, unsigned long long 
 
     n->start = start;
     n->end   = end;
+    n->virtual = virtual;
     return n;
 }
 
@@ -129,6 +130,7 @@ static void range_subtract(struct lemon_ctx *ctx, struct ram_regions *ram, struc
     while (g) {
         unsigned long long cur_start = g->start;
         unsigned long long cur_end   = g->end;
+        bool virtual = g->virtual;
 
         /* Skip not_ram ranges before current ram */
         while (b && b->end <= cur_start)
@@ -137,7 +139,7 @@ static void range_subtract(struct lemon_ctx *ctx, struct ram_regions *ram, struc
         struct mem_range *b_iter = b;
         while (b_iter && b_iter->start < cur_end) {
             if (b_iter->start > cur_start) {
-                struct mem_range *n = range_new(cur_start, b_iter->start);
+                struct mem_range *n = range_new(cur_start, b_iter->start, virtual);
                 if (n) TAILQ_INSERT_TAIL(&ctx->ram_regions, n, entries);
             }
 
@@ -151,7 +153,7 @@ static void range_subtract(struct lemon_ctx *ctx, struct ram_regions *ram, struc
         }
 
         if (cur_start < cur_end) {
-            struct mem_range *n = range_new(cur_start, cur_end);
+            struct mem_range *n = range_new(cur_start, cur_end, virtual);
             if (n) TAILQ_INSERT_TAIL(&ctx->ram_regions, n, entries);
         }
 
@@ -174,6 +176,7 @@ int get_iomem_regions_user(struct lemon_ctx *ctx, struct ram_regions *ram, struc
     uintptr_t start, end;
     int cap_ret;
     struct mem_range *range;
+    int ret = 0;
 
     /* Check if we have CAP_SYS_ADMIN capability */
     if((cap_ret = check_capability(ctx, CAP_SYS_ADMIN)) <= 0) {
@@ -195,9 +198,10 @@ int get_iomem_regions_user(struct lemon_ctx *ctx, struct ram_regions *ram, struc
         if (sscanf(line, "%lx-%lx", &start, &end) == 2)
         {
             /* Allocate new range element */
-            if(!(range = (range_new(start, end + 1)))) {
+            if(!(range = (range_new(start, end + 1, false)))) {
                 ERRNO("Failed to allocate memory for RAM ranges");
-                return errno;
+                ret = errno;
+                goto cleanup;
             }
 
             if (strcasestr(line, "System RAM"))
@@ -207,18 +211,19 @@ int get_iomem_regions_user(struct lemon_ctx *ctx, struct ram_regions *ram, struc
         }
     }
 
-    if(fclose(fp)) {        
-        perror("Fail to close /proc/iomem");
-        return errno;
-    }
-
     /* Filter ranges to have not overlapping ranges */
     tailq_sort(ram);
     tailq_sort(not_ram);
     range_merge_overlaps(ram);
     range_merge_overlaps(not_ram);
 
-    return 0;
+    cleanup:
+        if(fclose(fp)) {        
+            ERRNO("Fail to close /proc/iomem");
+            return errno;
+        }
+
+    return ret;
 }
 
 static struct resource *next_resource_uspace(const struct lemon_ctx *ctx,
@@ -240,7 +245,7 @@ static struct resource *next_resource_uspace(const struct lemon_ctx *ctx,
 
     /* Walk up until we find a sibling */
     while (!p->sibling && p->parent) {
-        if (p->parent == subtree_root)
+        if (p->parent == subtree_root) /* BUG: (?) p->parent is a kernel-space pointer read from kernel memory, while subtree_root is &root, a user-space stack address*/
             return NULL;
 
         if ((err = read_kernel_memory((uintptr_t)p->parent, sizeof(struct resource), data))) {
@@ -298,7 +303,7 @@ int get_iomem_regions_kernel(struct lemon_ctx *ctx, struct ram_regions *ram, str
 
     /* Walk the full tree: children + siblings, kernel-style */
     while (res) {
-        if (!(range = range_new(res->start, res->end + 1))) {
+        if (!(range = range_new(res->start, res->end + 1, false))) {
                 ERRNO("Failed to allocate memory for new ranges");
                 return errno;
             }
