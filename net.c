@@ -26,6 +26,7 @@ int write_on_socket(void *restrict args, const void *restrict data, const unsign
     unsigned long total;
     struct net_args *net_args = (struct net_args *)args;
     void *dummy_buffer = NULL;
+    int ret = 0;
 
     /* If data is NULL or size is 0, allocate a dummy buffer to be written */
     if(data == NULL && size > 0) {
@@ -44,15 +45,17 @@ int write_on_socket(void *restrict args, const void *restrict data, const unsign
         if(r == -1) {
             if(errno == EINTR) continue;
             ERRNO("Fail to write on socket");
-            return errno;
+            ret = errno;
+            goto cleanup;
         }
         
         total += r;
     }
 
-    if(dummy_buffer) free(dummy_buffer);
+    cleanup:
+        if(dummy_buffer) free(dummy_buffer);
 
-    return 0;
+    return ret;
 }
 
 /*

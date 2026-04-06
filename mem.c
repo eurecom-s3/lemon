@@ -102,7 +102,7 @@ static int init_mmap() {
     
     read_mem_result_fd = bpf_map__fd(mem_ebpf_skel->maps.read_mem_array_map);
     if(read_mem_result_fd < 0)
-        return read_mem_result_fd;
+        return errno ? errno : ENOENT;
 
     read_mem_result = (struct read_mem_result *)mmap(NULL, sizeof(struct read_mem_result), PROT_READ | PROT_WRITE, MAP_SHARED, read_mem_result_fd, 0);
     if (read_mem_result == MAP_FAILED) {
@@ -116,7 +116,7 @@ static int init_mmap() {
  * init_udp_socket() - Create and configure UDP socket for sending trigger packets
  *
  * Creates a UDP socket for sending XDP trigger packets to the loopback interface.
- * Returns 0 on success, negative errno value on failure.
+ * Returns 0 on success, positive errno value on failure.
  */
 static int init_udp_socket() {
     // struct sockaddr_in local_addr;
@@ -125,7 +125,7 @@ static int init_udp_socket() {
     udp_sockfd = socket(AF_INET, SOCK_DGRAM, 0);
     if (udp_sockfd < 0) {
         ERRNO("Failed to create UDP socket for XDP trigger");
-        return -errno;
+        return errno;
     }
 
     // /* Setup local address structure for binding*/
@@ -141,7 +141,7 @@ static int init_udp_socket() {
  * load_ebpf_mem_progs() - Initialize and attach eBPF programs for memory access
  *
  * Opens, loads, attaches the eBPF programs, and sets up shared memory. 
- * Returns 0 on success or a negative error code on failure.
+ * Returns 0 on success or a positive errno on failure.
  */
 int load_ebpf_mem_progs(struct lemon_ctx *restrict ctx) {
     int ret;
@@ -154,7 +154,7 @@ int load_ebpf_mem_progs(struct lemon_ctx *restrict ctx) {
     #endif
 
     /* Check if we have sufficient capabilities to set RLIMIT_MEMLOCK (required by libbpf...)*/
-    if((check_capability(ctx, CAP_PERFMON) <= 0) && (check_capability(ctx, CAP_SYS_ADMIN) <= 0)) {
+    if((check_capability(ctx, CAP_PERFMON) != 1) && (check_capability(ctx, CAP_SYS_ADMIN) != 1)) {
         WARN("LEMON does not have CAP_PERFMON needed to modify RLIMIT_MEMLOCK");
     }
 
@@ -162,13 +162,13 @@ int load_ebpf_mem_progs(struct lemon_ctx *restrict ctx) {
     mem_ebpf_skel = mem_ebpf__open();
     if(!mem_ebpf_skel) {
         ERRNO("Failed to open BPF skeleton");
-        return -errno;
+        return errno;
     }
 
     /* Load the BPF objectes */
     if (mem_ebpf__load(mem_ebpf_skel)) {
         ERRNO("Failed to load BPF object");
-        return -errno;
+        return errno;
     }
 
     /* ARM64 phys to virt translation requires two values, one of the two (CONFIG_ARM64_VA_BITS)
@@ -185,7 +185,7 @@ int load_ebpf_mem_progs(struct lemon_ctx *restrict ctx) {
         }
 
         ctx->sparsemem_vmap_config = cfg_vals.CONFIG_SPARSEMEM_VMEMMAP;
-        DBG("CONFIG_SPARSEMEM_VMEMMAP %d", ctx->sparsemem_vmap_config);
+        DBG("CONFIG_SPARSEMEM_VMEMMAP %c", ctx->sparsemem_vmap_config);
         ctx->va_bits_config = cfg_vals.CONFIG_ARM64_VA_BITS;
         DBG("CONFIG_ARM64_VA_BITS %lu", ctx->va_bits_config);
         if(ctx->va_bits_config)
@@ -216,14 +216,14 @@ int load_ebpf_mem_progs(struct lemon_ctx *restrict ctx) {
         int ifindex = if_nametoindex(loopback_interface);
         if (ifindex <= 0) {
             ERRNO("Failed to get interface index");
-            return -errno;
+            return errno;
         }
         
         /* Attach XDP program to the interface */
         bpf_prog_link = bpf_program__attach_xdp(mem_ebpf_skel->progs.read_kernel_memory_xdp, ifindex);
         if (!bpf_prog_link) {
             ERR("Failed to attach XDP program to interface %s", loopback_interface);
-            return -errno;
+            return errno;
         }
         
         /* Create socket for sending trigger packets */
@@ -310,13 +310,13 @@ static int send_udp_trigger_packet(const uintptr_t addr, const size_t size) {
 
     if (sent_bytes < 0) {
         ERRNO("Failed to send UDP trigger packet");
-        return -errno;
+        return errno;
     }
 
     /* Check partial send*/
     if (sent_bytes != sizeof(args)) {
         fprintf(stderr, "Incomplete packet send: %zd of %zu bytes\n", sent_bytes, sizeof(args));
-        return -EIO;
+        return EIO;
     }
 
     return 0;
@@ -338,7 +338,7 @@ static int __attribute__((noinline, optnone)) _read_kernel_memory(const uintptr_
 
         /* Send UDP trigger packet for XDP*/
         ret = send_udp_trigger_packet(addr, size);
-        if (ret < 0) {
+        if (ret) {
             read_mem_result->ret_code = ret;
             return ret;
         }
@@ -360,7 +360,8 @@ static int __attribute__((noinline, optnone)) _read_kernel_memory(const uintptr_
     /* Default error code to catch failed attach of array map by the kernel */
     read_mem_result->ret_code = -EINVAL;
 
-    return _read_kernel_memory(addr, size, data);
+    int rc = _read_kernel_memory(addr, size, data);
+    return rc < 0 ? -rc : rc;
  }
 
 /*
@@ -403,7 +404,7 @@ static int parse_kallsyms(struct lemon_ctx *restrict ctx) {
     _Static_assert(sizeof(uintptr_t) == sizeof(int64_t), "sizeof(uintptr_t) != sizeof(int64_t)");
 
     /* Check for capabilities */
-    if((check_capability(ctx, CAP_SYSLOG) <= 0)) {
+    if((check_capability(ctx, CAP_SYSLOG) != 1)) {
         ERR("LEMON does not have CAP_SYSLOG to read addresses from /proc/kallsyms");
         return EPERM;
     }
@@ -515,12 +516,12 @@ static int parse_kallsyms(struct lemon_ctx *restrict ctx) {
     if(!ctx->original_kptr) goto cleanup;
 
     /* If the value is 1 and we have CAP_SYSLOG is not necessary to toggle it (neigter CAP_SYS_ADMIN!) :) */
-    if((ctx->original_kptr == 1) && (check_capability(ctx, CAP_SYSLOG) > 0)) goto cleanup;
+    if((ctx->original_kptr == 1) && (check_capability(ctx, CAP_SYSLOG) == 1)) goto cleanup;
 
     /* Check CAP_SYS_ADMIN to modify kptr_restrict */
-    if((cap_ret = check_capability(ctx, CAP_SYS_ADMIN)) <= 0) {
+    if((cap_ret = check_capability(ctx, CAP_SYS_ADMIN)) != 1) {
         fprintf(stderr, "LEMON does not have CAP_SYS_ADMIN to modify /proc/sys/kernel/kptr_restrict policy\n");
-        err = cap_ret;
+        err = (cap_ret > 1) ? cap_ret : EPERM;
         goto cleanup;
     }
 

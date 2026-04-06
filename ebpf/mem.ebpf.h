@@ -17,7 +17,7 @@ struct read_mem_args {
 };
 
 struct config_values {
-    int CONFIG_ARM64_VA_BITS;
+    unsigned long CONFIG_ARM64_VA_BITS;
     bool CONFIG_SPARSEMEM_VMEMMAP;
 };
 

@@ -21,6 +21,7 @@ static int write_on_disk(void *restrict args, const void *restrict data, const u
     ssize_t r = 0;
     unsigned long total = 0;
     void *dummy_buffer = NULL;
+    int ret = 0;
 
     /* If data is NULL or size is 0, allocate a dummy buffer to be written */
     if(data == NULL && size > 0) {
@@ -38,15 +39,17 @@ static int write_on_disk(void *restrict args, const void *restrict data, const u
         if(r == -1) {
             if(errno == EINTR) continue;
             ERRNO("Fail to write on dump file");
-            return errno;
+            ret = errno;
+            goto cleanup;
         }
         
         total += r;
     }
 
-    if(dummy_buffer) free(dummy_buffer);
+    cleanup:
+        if(dummy_buffer) free(dummy_buffer);
 
-    return 0;
+    return ret;
 }
 
 /*
@@ -62,12 +65,12 @@ int dump_on_disk(const struct lemon_ctx *restrict ctx) {
     int ret = 0;
 
     /* Check CAP_DAC_OVERRIDE, creation of the file can fail without it */
-    if(check_capability(ctx, CAP_DAC_OVERRIDE) <= 0) {
+    if(check_capability(ctx, CAP_DAC_OVERRIDE) != 1) {
         WARN("LEMON does not have CAP_DAC_OVERRIDE, it may fail in dump file creation\n");
     }
 
     /* Open dump file in write mode */
-    fd = open(ctx->opts.path, O_CREAT | O_WRONLY | O_TRUNC | S_IRUSR, S_IWUSR | S_IRGRP | S_IROTH);
+    fd = open(ctx->opts.path, O_CREAT | O_WRONLY | O_TRUNC | S_IRUSR , S_IWUSR | S_IRGRP | S_IROTH);
     if(fd < 0) {
         ERRNO("Failed to open dump file for writing");
         return errno;

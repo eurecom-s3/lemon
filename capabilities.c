@@ -25,7 +25,7 @@
  *
  * Retrieves the current process's capabilities using libcap, checks whether the given
  * capability is present in the effective set, and returns the result.
- * Returns 1 if the capability is set, 0 if not set, and a negative errno value on error.
+ * Returns 1 if the capability is set, 0 if not set, and a positive errno value (> 1) on error.
  */
 int check_capability(const struct lemon_ctx *restrict ctx, cap_value_t cap) {
     cap_flag_value_t cap_flag;
@@ -33,7 +33,7 @@ int check_capability(const struct lemon_ctx *restrict ctx, cap_value_t cap) {
     /* Get effective capabilities */
     if (cap_get_flag(ctx->capabilities, cap, CAP_EFFECTIVE, &cap_flag) == -1) {
         ERRNO("Fail to get effective capabilities");
-        return -errno;
+        return errno;
     }
 
     return(cap_flag == CAP_SET);

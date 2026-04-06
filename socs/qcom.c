@@ -81,7 +81,7 @@ static int btf_find_field_recursive(struct btf *btf,
     return -1;
 }
 
-/* Return 1 if qualcomm sock, 0 if not, <0  if error */
+/* Return 0 if not qualcomm, 1 if qualcomm ok, positive errno (> 1) on error */
 int check_init_qualcomm(struct lemon_ctx *restrict ctx) {
 
     struct btf *vmlinux_btf;
@@ -103,41 +103,41 @@ int check_init_qualcomm(struct lemon_ctx *restrict ctx) {
     INFO("Device use Qualcomm SoC");
 
     /* We support only CO-RE binaries and CONFIG_SPARSEMEM_VMEMMAP configurations */
-    if(!ctx->is_core_supported) { // || !ctx->sparsemem_vmap_config) { TODO: there is a bug in libbpf that does not load the CONFIG_SPARSEMEM_VMEMMAP symbol...
+    if(!ctx->is_core_supported || ctx->sparsemem_vmap_config != 'y') {
         ERR("Unsupported Qualcomm Kernel configuration. We support only CO-RE binaries and kernels with CONFIG_SPARSEMEM_VMEMMAP enabled");
-        return -ENOSYS;
+        return ENOSYS;
     }
 
     /* Huge page is incompatible with the quirks */
     if(ctx->opts.use_huge_pages) {
         ERR("Huge page option is not usable on Qualcomm SoCs");
-        return -EINVAL;
+        return EINVAL;
     }
 
     /* We need the address of mem_section */
     if(!ctx->mem_section) {
         ERR("struct mem_section array not found.");
-        return -EINVAL;
+        return EINVAL;
     }
 
     /* Retrieve the struct page size from BTF symbols */
     vmlinux_btf = btf__load_vmlinux_btf();
     if (!vmlinux_btf) {
         ERR("Fail to load vmlinux BTF");
-        return -ENOENT;
+        return ENOENT;
     }
 
     struct_id = btf__find_by_name_kind(vmlinux_btf, "page", BTF_KIND_STRUCT);
     if(struct_id < 0) {
         ERR("struct page not present in BTF");
-        ret = -EINVAL;
+        ret = EINVAL;
         goto cleanup;
     }
 
     struct_type = btf__type_by_id(vmlinux_btf, struct_id);
-    if (!struct_type || struct_type->size <= 0) {
+    if (!struct_type || !struct_type->size) {
         ERR("Invalid sizeof(struct page)");
-        ret = -EINVAL;
+        ret = EINVAL;
         goto cleanup;
     }
     struct_page_size = struct_type->size;
@@ -146,7 +146,7 @@ int check_init_qualcomm(struct lemon_ctx *restrict ctx) {
     offset = btf_find_field_recursive(vmlinux_btf, struct_id, "private", 0);
     if(offset < 0) {
         ERR("Invalid offset for private field of struct page");
-        ret = -EINVAL;
+        ret = EINVAL;
         goto cleanup;
     }
     private_offset = offset;
@@ -155,14 +155,14 @@ int check_init_qualcomm(struct lemon_ctx *restrict ctx) {
     struct_id = btf__find_by_name_kind(vmlinux_btf, "mem_section", BTF_KIND_STRUCT);
     if(struct_id < 0) {
         ERR("struct mem_section not present in BTF");
-        ret = -EINVAL;
+        ret = EINVAL;
         goto cleanup;
     }
 
     struct_type = btf__type_by_id(vmlinux_btf, struct_id);
     if (!struct_type || struct_type->size <= 0) {
         ERR("Invalid sizeof(mem_section)");
-        ret = -EINVAL;
+        ret = EINVAL;
         goto cleanup;
     }
     mem_section_size = struct_type->size;
@@ -170,20 +170,20 @@ int check_init_qualcomm(struct lemon_ctx *restrict ctx) {
     section_mem_map_offset = btf_find_field_recursive(vmlinux_btf, struct_id, "section_mem_map", 0);
     if(section_mem_map_offset < 0) {
         ERR("Invalid offset for section_mem_map field of struct mem_section");
-        ret = -EINVAL;
+        ret = EINVAL;
         goto cleanup;
     }
 
     /* We read the double array mem_section */
     if(read_kernel_memory(ctx->mem_section, sizeof(uintptr_t), &data)) { /* mem_section ** address*/
         ERR("Failed to access mem_section array (symbol)");
-        ret = -EIO;
+        ret = EIO;
         goto cleanup;
     }
 
     if(read_kernel_memory(*(uintptr_t *)data, sizeof(uintptr_t), &data)) { /* mem_section * address */
         ERR("Failed to access mem_section array (1st dereference)");
-        ret = -EIO;
+        ret = EIO;
         goto cleanup;
     }
 
@@ -197,7 +197,7 @@ int check_init_qualcomm(struct lemon_ctx *restrict ctx) {
     /* Read the array */
     if(read_kernel_memory(*(uintptr_t *)data, min_section * mem_section_size, &data)) { /* mem_section[0] address */
         ERR("Failed to read mem_section array");
-        ret = -EIO;
+        ret = EIO;
         goto cleanup;
     }
 
@@ -210,7 +210,7 @@ int check_init_qualcomm(struct lemon_ctx *restrict ctx) {
     }
     if(!vmemmap) {
         ERR("vmemmap not found");
-        ret = -EINVAL;
+        ret = EINVAL;
         goto cleanup;
     }
 

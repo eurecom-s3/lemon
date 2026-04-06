@@ -179,9 +179,9 @@ int get_iomem_regions_user(struct lemon_ctx *ctx, struct ram_regions *ram, struc
     int ret = 0;
 
     /* Check if we have CAP_SYS_ADMIN capability */
-    if((cap_ret = check_capability(ctx, CAP_SYS_ADMIN)) <= 0) {
+    if((cap_ret = check_capability(ctx, CAP_SYS_ADMIN)) != 1) {
         ERR("LEMON does not have CAP_SYS_ADMIN to read /proc/iomem");
-        return cap_ret;
+        return (cap_ret > 1) ? cap_ret : EPERM;
     }
 
     /* Open the /proc/iomem and parse only "System RAM" regions */

@@ -76,7 +76,7 @@ static const char doc[] = LEMON_DOC;
  * @arg:   Input string in the form "ADDR:SIZE" (both values may be decimal or 0x-prefixed hex).
  * @range: Output mem_range where start = ADDR and end = ADDR + SIZE - 1.
  *
- * Returns 0 on success, -1 if the format is invalid or parsing fails.
+ * Returns 0 on success, EINVAL if the format is invalid or parsing fails.
  */
 static int parse_mem_range(const bool virtual, const char *arg, struct mem_range *range) {
     char *sep;
@@ -86,15 +86,15 @@ static int parse_mem_range(const bool virtual, const char *arg, struct mem_range
 
     sep = strchr(arg, ':');
     if (!sep)
-        return -1;
+        return EINVAL;
 
     addr = strtoull(arg, &endptr, 0);
     if (endptr != sep)
-        return -1;
+        return EINVAL;
 
     size = strtoul(sep + 1, &endptr, 0);
     if (*endptr != '\0' || size == 0)
-        return -1;
+        return EINVAL;
 
     range->start = addr;
     range->end   = addr + size;
@@ -213,9 +213,8 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
 /*
  * check_kernel_version() - Checks if the running Linux kernel version support all the feature requested
  * Return:
- *   1 if kernel version is valid
- *   0 if kernel version does not support all the features
- *   < 0 on failure
+ *   0 on success (version ok, or too-old warning printed internally)
+ *   positive errno on failure
  */
 static int check_kernel_version(struct lemon_ctx *restrict ctx) {
     struct utsname buffer;
@@ -223,17 +222,20 @@ static int check_kernel_version(struct lemon_ctx *restrict ctx) {
 
     if (uname(&buffer) != 0) {
         ERRNO("Fail to get Linux kernel version");
-        return -errno;
+        return errno;
     }
     if(sscanf(buffer.release, "%d.%d.%d", &major, &minor, &patch) != 3) {
         ERR("Fail to parse Linux version");
-        return -EINVAL;
+        return EINVAL;
     }
     DBG("Kernel version: %d.%d.%d", major, minor, patch);
 
     memcpy(&ctx->kern_info, &buffer, sizeof(struct utsname));
 
-    return (major > MIN_MAJOR_LINUX) || ((major == MIN_MAJOR_LINUX) && (minor >= MIN_MINOR_LINUX));
+    if (!((major > MIN_MAJOR_LINUX) || ((major == MIN_MAJOR_LINUX) && (minor >= MIN_MINOR_LINUX))))
+        WARN("Detected Linux version is not supported by LEMON. Minimum required version: %d.%d. Try to continue anyway...", MIN_MAJOR_LINUX, MIN_MINOR_LINUX);
+
+    return 0;
 }
 
 /**
@@ -250,19 +252,19 @@ static int getprop_cmd(const struct lemon_ctx *restrict ctx, char *name, char *v
     char buf[256];
 
     if (!name || !value || value_size == 0)
-        return -EINVAL;
+        return EINVAL;
 
     /* Build the command string */
     snprintf(cmd, sizeof(cmd), "getprop %s", name);
 
     FILE *fp = popen(cmd, "r");
     if (!fp)
-        return -ENOENT;
+        return ENOENT;
 
     /* Read first line of output */
     if (!fgets(buf, sizeof(buf), fp)) {
         pclose(fp);
-        return -EIO;
+        return EIO;
     }
     pclose(fp);
 
@@ -273,7 +275,7 @@ static int getprop_cmd(const struct lemon_ctx *restrict ctx, char *name, char *v
 
     /* Empty string means property doesn't exist */
     if (buf[0] == '\0')
-        return -EINVAL;
+        return EINVAL;
 
     strncpy(value, buf, value_size - 1);
     value[value_size - 1] = '\0';
@@ -285,20 +287,20 @@ static int getprop_cmd(const struct lemon_ctx *restrict ctx, char *name, char *v
 
 /* Look for mandatory android */
 static int collect_android_info(struct lemon_ctx *restrict ctx) {
+    int ret;
     ctx->is_android = access("/system/bin/getprop", X_OK) == 0 || access("/vendor/bin/getprop", X_OK) == 0;
     DBG("Android: %d", ctx->is_android);
     if(!ctx->is_android)
         return 0;
 
     /* Extract Android related info */
-    if(
-        getprop_cmd(ctx, "ro.product.manufacturer", ctx->manufacturer, MAX_INFO_FIELD) ||
-        getprop_cmd(ctx, "ro.product.model", ctx->model, MAX_INFO_FIELD) || 
-        getprop_cmd(ctx, "ro.soc.manufacturer", ctx->soc_manufacturer, MAX_INFO_FIELD) ||
-        getprop_cmd(ctx, "ro.soc.model", ctx->soc_model, MAX_INFO_FIELD) ||
-        getprop_cmd(ctx, "ro.build.fingerprint", ctx->fingerprint, MAX_INFO_FIELD))
-        return 1;
-    
+    if((ret = getprop_cmd(ctx, "ro.product.manufacturer", ctx->manufacturer, MAX_INFO_FIELD)) ||
+       (ret = getprop_cmd(ctx, "ro.product.model", ctx->model, MAX_INFO_FIELD)) ||
+       (ret = getprop_cmd(ctx, "ro.soc.manufacturer", ctx->soc_manufacturer, MAX_INFO_FIELD)) ||
+       (ret = getprop_cmd(ctx, "ro.soc.model", ctx->soc_model, MAX_INFO_FIELD)) ||
+       (ret = getprop_cmd(ctx, "ro.build.fingerprint", ctx->fingerprint, MAX_INFO_FIELD)))
+        return ret;
+
     return 0;
 }
 
@@ -346,12 +348,12 @@ static int collect_system_info(struct lemon_ctx *restrict ctx) {
     
 
     /* Check Linux version */
-    if(check_kernel_version(ctx) != 1) {
+    if((ret = check_kernel_version(ctx))) {
         WARN("Detected Linux version is not supported by LEMON. Minimum required version: %d.%d. Try to continue anyway...", MIN_MAJOR_LINUX, MIN_MINOR_LINUX);
     }
 
     /* Check if can load eBPF programs */
-    if((check_capability(ctx, CAP_BPF) <= 0) && (check_capability(ctx, CAP_SYS_ADMIN) <= 0)) {
+    if((check_capability(ctx, CAP_BPF) != 1) && (check_capability(ctx, CAP_SYS_ADMIN) != 1)) {
         WARN("LEMON does not have CAP_BPF nor CAP_SYS_ADMIN to load the eBPF component. Try to continue anyway...");
     }
 
@@ -374,10 +376,7 @@ static int cleanup_context(struct lemon_ctx *ctx) {
 }
 
 static int init_socs_quirks(struct lemon_ctx *ctx) {
-    int ret;
-    if((ret = check_init_qualcomm(ctx)) < 0) return 1;
-
-    return 0;
+    return check_init_qualcomm(ctx);
 }
 
 int main(int argc, char **argv) {
@@ -394,7 +393,10 @@ int main(int argc, char **argv) {
     /* Parse the arguments */
     argp_parse(&argp, argc, argv, 0, 0, &ctx.opts);
 
+    /* Banner :D */
     printf("%s", lemon_banner);
+    fflush(stdout);
+
     /* Collect system info */
     if(collect_system_info(&ctx)) {
         ERR("Failed to collect system info");
@@ -430,7 +432,7 @@ int main(int argc, char **argv) {
     if((ret = init_translation(&ctx))) goto cleanup;
 
     /* Init SoCs quirks */
-    if((ret = init_socs_quirks(&ctx))) goto cleanup;
+    if((ret = init_socs_quirks(&ctx)) > 1) goto cleanup;
 
     /* Dump on a file */
     if(ctx.opts.dump_mode == MODE_DISK) {

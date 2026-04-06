@@ -2,7 +2,6 @@
 #include <string.h>
 #include <stdint.h>
 #include <unistd.h>
-#include <math.h>
 
 #include "lemon.h"
 
@@ -82,7 +81,7 @@ static int dump_region(const struct lemon_ctx *restrict ctx, uintptr_t region_st
         }
         
         /* Save the chunk */
-        if ((ret = write_f(args, read_data, chunk_size)) < 0) {
+        if ((ret = write_f(args, read_data, chunk_size))) {
             ERR("Error saving dump data");
             return ret;
         }
