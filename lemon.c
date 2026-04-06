@@ -379,6 +379,91 @@ static int init_socs_quirks(struct lemon_ctx *ctx) {
     return check_init_qualcomm(ctx);
 }
 
+static void print_context_report(const struct lemon_ctx *restrict ctx, int dump_status) {
+    const char *trigger_str;
+    struct mem_range *range;
+    int region_count = 0;
+    unsigned long long total_size = 0;
+
+    switch (ctx->ebpf_trigger) {
+        case UPROBE: trigger_str = "uprobe"; break;
+        case XDP:    trigger_str = "xdp";    break;
+        default:     trigger_str = "none";   break;
+    }
+
+    TAILQ_FOREACH(range, &ctx->ram_regions, entries) {
+        region_count++;
+        total_size += range->end - range->start;
+    }
+
+    fprintf(stderr,
+        "\n"
+        "Post this output on the LEMON site to improve the compatibility table.\n"
+        "\n"
+        "--- 8< --- CUT HERE --- 8< ---\n"
+        "LEMON_VERSION=%s\n"
+        "ARCH=%s\n"
+        "BUILD_MODE=%s\n"
+        "STATIC=%d\n"
+        "KERNEL_RELEASE=%s\n"
+        "RUN_AS_ROOT=%u\n"
+        "ANDROID=%u\n"
+        "QUALCOMM=%u\n"
+        "CORE_SUPPORTED=%u\n"
+        "EBPF_TRIGGER=%s\n"
+        "VA_BITS=%lu\n"
+        "VA_BITS_CONFIG=%lu\n"
+        "SPARSEMEM_VMEMMAP=%c\n"
+        "PAGE_SIZE=%d\n"
+        "GRANULE=%d\n"
+        "DUMP_MODE=%s\n"
+        "RAM_REGIONS=%d\n"
+        "TOTAL_RAM_SIZE=0x%\n",
+        lemon_version,
+        architecture,
+        binary_type,
+        is_static,
+        ctx->kern_info.release,
+        ctx->run_as_root,
+        ctx->is_android,
+        ctx->is_qualcomm,
+        ctx->is_core_supported,
+        trigger_str,
+        ctx->va_bits,
+        ctx->va_bits_config,
+        ctx->sparsemem_vmap_config ? ctx->sparsemem_vmap_config : '?',
+        PAGE_SIZE,
+        ctx->granule,
+        ctx->opts.dump_mode == MODE_DISK ? "disk" :
+            ctx->opts.dump_mode == MODE_NETWORK ? "network" : "undefined",
+        region_count,
+        total_size
+    );
+
+    if (ctx->is_android) {
+        fprintf(stderr,
+            "MANUFACTURER=%s\n"
+            "MODEL=%s\n"
+            "SOC_MANUFACTURER=%s\n"
+            "SOC_MODEL=%s\n"
+            "FINGERPRINT=%s\n",
+            ctx->manufacturer,
+            ctx->model,
+            ctx->soc_manufacturer,
+            ctx->soc_model,
+            ctx->fingerprint
+        );
+    }
+
+    fprintf(stderr,
+        "DUMP_STATUS=%s\n"
+        "DUMP_ERROR=%d\n"
+        "--- 8< --- CUT HERE --- 8< ---\n",
+        dump_status == 0 ? "success" : "fail",
+        dump_status
+    );
+}
+
 int main(int argc, char **argv) {
     struct lemon_ctx ctx;
     struct argp argp = {options, parse_opt, "", doc};
@@ -452,6 +537,8 @@ int main(int argc, char **argv) {
 
         /* Restore kptr_restrict if needed */
         toggle_kptr(&ctx);
+
+        print_context_report(&ctx, ret);
 
         cleanup_context(&ctx);
 
