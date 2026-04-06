@@ -8,10 +8,11 @@
 
 #include "lemon.h"
 
-/* Kernel definition of a memory region (from include/linux/ioport.h) 
- * !!! WARNING !!! In theory this struct can change in different kernel versions
- *                 However last time changes was in Linux 4.6
+/*
+ * iomem.c - RAM region lists: range helpers, /proc/iomem parsing, and kernel resource tree walks.
  */
+
+/* Mirror of struct resource in include/linux/ioport.h (layout stable since Linux 4.6). */
 struct resource {
     unsigned long long start;
     unsigned long long end;
@@ -30,6 +31,14 @@ struct resource {
 extern int check_capability(const struct lemon_ctx *restrict ctx, const cap_value_t cap);
 extern int read_kernel_memory(const uintptr_t addr, const size_t size, unsigned char **restrict data);
 
+/*
+ * range_new() - Allocate one mem_range for half-open [start, end)
+ * @start: First byte of the range (inclusive).
+ * @end: Byte past the last byte (exclusive); must be greater than @start.
+ * @virtual: Whether dump_region() should use virtual addresses for this range.
+ *
+ * Returns NULL on invalid bounds or malloc failure (errno set by malloc on OOM).
+ */
 struct mem_range *range_new(unsigned long long start, unsigned long long end, bool virtual) {
     if (start >= end)
         return NULL;
@@ -44,21 +53,26 @@ struct mem_range *range_new(unsigned long long start, unsigned long long end, bo
     return n;
 }
 
-
+/*
+ * range_list_free() - Remove and free every mem_range on a TAILQ head
+ * @list: Queue head (may be NULL).
+ */
 void range_list_free(struct ram_regions *list) {
     struct mem_range *it, *tmp;
     if(!list) return;
 
     TAILQ_FOREACH_SAFE(it, list, entries, tmp) {
-        TAILQ_REMOVE(list, it, entries);  /* sicuro: tmp salva il next prima */
+        /* TAILQ_FOREACH_SAFE saves next before REMOVE. */
+        TAILQ_REMOVE(list, it, entries);
         free(it);
     }
 
     TAILQ_INIT(list);
 }
 
-/* Comparator for qsort – arr elements are struct mem_range *, so qsort
-   passes struct mem_range ** as the comparator arguments. */
+/*
+ * cmp_range() - qsort comparator for struct mem_range * (sort by start, then end).
+ */
 static int cmp_range(const void *a, const void *b) {
     const struct mem_range *x = *(const struct mem_range *const *)a;
     const struct mem_range *y = *(const struct mem_range *const *)b;
@@ -69,9 +83,14 @@ static int cmp_range(const void *a, const void *b) {
     return 0;
 }
 
-/* Sort a TAILQ list using an array and qsort */
+/*
+ * tailq_sort() - Stable logical order: copy pointers to an array, qsort, rebuild TAILQ
+ * @list: In/out list (reinitialized then repopulated).
+ *
+ * On malloc failure, leaves the list unsorted and logs a warning.
+ */
 void tailq_sort(struct ram_regions *list) {
-    /* Count elements */
+    /* Count nodes for array allocation. */
     size_t n = 0;
     struct mem_range *it;
     TAILQ_FOREACH(it, list, entries)
@@ -82,8 +101,10 @@ void tailq_sort(struct ram_regions *list) {
 
     /* Copy pointers to array */
     struct mem_range **arr = malloc(n * sizeof(*arr));
-    if (!arr)
+    if (!arr) {
+        WARN("Failed to allocate memory for sorting %zu ranges", n);
         return;
+    }
 
     size_t i = 0;
     TAILQ_FOREACH(it, list, entries)
@@ -100,6 +121,10 @@ void tailq_sort(struct ram_regions *list) {
     free(arr);
 }
 
+/*
+ * range_merge_overlaps() - Merge adjacent or overlapping half-open intervals in place
+ * @list: Sorted list (caller runs tailq_sort first).
+ */
 static void range_merge_overlaps(struct ram_regions *list) {
     struct mem_range *cur = TAILQ_FIRST(list);
 
@@ -107,13 +132,13 @@ static void range_merge_overlaps(struct ram_regions *list) {
         struct mem_range *next = TAILQ_NEXT(cur, entries);
 
         while (next != NULL && cur->end >= next->start) {
-            /* extend current interval if necessary */
+            /* Extend cur to cover next; drop the redundant node. */
             if (next->end > cur->end)
                 cur->end = next->end;
 
-            /* remove next from list */
-            TAILQ_REMOVE(list, next, entries);
+            /* Save successor before unlinking next (TAILQ_REMOVE invalidates next's links). */
             struct mem_range *tmp = TAILQ_NEXT(next, entries);
+            TAILQ_REMOVE(list, next, entries);
             free(next);
             next = tmp; /* continue merging */
         }
@@ -123,6 +148,12 @@ static void range_merge_overlaps(struct ram_regions *list) {
     }
 }
 
+/*
+ * range_subtract() - Subtract not_ram holes from ram into ctx->ram_regions (unused today)
+ * @ctx: Destination queue for resulting gaps.
+ * @ram: System RAM intervals.
+ * @not_ram: Reserved / non-RAM intervals to carve out.
+ */
 static void range_subtract(struct lemon_ctx *ctx, struct ram_regions *ram, struct ram_regions *not_ram) {
     struct mem_range *g = TAILQ_FIRST(ram);
     struct mem_range *b = TAILQ_FIRST(not_ram);
@@ -162,12 +193,12 @@ static void range_subtract(struct lemon_ctx *ctx, struct ram_regions *ram, struc
 }
 
 /*
- * get_iomem_regions_user() - Parse /proc/iomem to extract "System RAM" regions
- * @ram_regions: Pointer to store the extracted RAM regions
+ * get_iomem_regions_user() - Parse /proc/iomem into RAM vs non-RAM TAILQs
+ * @ctx: Capability checks only.
+ * @ram: Out: ranges whose lines contain "System RAM".
+ * @not_ram: Out: all other parsed ranges (for future subtraction).
  *
- * Opens /proc/iomem, searches for "System RAM" regions, and populates the provided
- * ram_regions struct with the start and end addresses of each region. The function
- * reallocates memory as needed to accommodate additional regions. 
+ * Requires CAP_SYS_ADMIN. Uses half-open [start, end+1) after sscanf end inclusive.
  * Returns 0 on success, or an error code on failure.
  */
 int get_iomem_regions_user(struct lemon_ctx *ctx, struct ram_regions *ram, struct ram_regions *not_ram) {
@@ -178,29 +209,30 @@ int get_iomem_regions_user(struct lemon_ctx *ctx, struct ram_regions *ram, struc
     struct mem_range *range;
     int ret = 0;
 
-    /* Check if we have CAP_SYS_ADMIN capability */
+    /* /proc/iomem exposes physical ranges only with CAP_SYS_ADMIN (without iomem_resource). */
     if((cap_ret = check_capability(ctx, CAP_SYS_ADMIN)) != 1) {
         ERR("LEMON does not have CAP_SYS_ADMIN to read /proc/iomem");
         return (cap_ret > 1) ? cap_ret : EPERM;
     }
 
-    /* Open the /proc/iomem and parse only "System RAM" regions */
     fp = fopen("/proc/iomem", "r");
     if (!fp)
     {
-        ERRNO("Failed to open /proc/iomem");
-        return errno;
+        RETURN_ERRNO("Failed to open /proc/iomem");
     }
 
-    /* Divide regions in RAM and not RAM ones, semi open intervals [start, end) */
+    /* Parse all address ranges; end from the file is inclusive, convert to exclusive. */
     while (fgets(line, sizeof(line), fp))
     {
         if (sscanf(line, "%lx-%lx", &start, &end) == 2)
         {
-            /* Allocate new range element */
             if(!(range = (range_new(start, end + 1, false)))) {
-                ERRNO("Failed to allocate memory for RAM ranges");
-                ret = errno;
+                int saved_errno = errno;
+                if (saved_errno)
+                    ERRNO("Failed to allocate memory for RAM ranges");
+                else
+                    ERR("Invalid memory range in /proc/iomem: %lx-%lx", start, end);
+                ret = saved_errno ? saved_errno : EINVAL;
                 goto cleanup;
             }
 
@@ -211,45 +243,56 @@ int get_iomem_regions_user(struct lemon_ctx *ctx, struct ram_regions *ram, struc
         }
     }
 
-    /* Filter ranges to have not overlapping ranges */
+    /* Normalize ordering and merge overlaps within each class. */
     tailq_sort(ram);
     tailq_sort(not_ram);
     range_merge_overlaps(ram);
     range_merge_overlaps(not_ram);
 
     cleanup:
-        if(fclose(fp)) {        
+        if(fclose(fp)) {
+            if (!ret) ret = errno;
             ERRNO("Fail to close /proc/iomem");
-            return errno;
         }
 
     return ret;
 }
 
+/*
+ * next_resource_uspace() - Kernel resource tree preorder successor using eBPF reads
+ * @ctx: iomem_resource root pointer for end-of-walk detection.
+ * @cur: Last visited node (user copy; pointers are kernel addresses).
+ * @data: In/out: mmap buffer from read_kernel_memory (overwritten each read).
+ * @err_out: Set to read_kernel_memory errno on failure; unchanged on normal NULL return.
+ *
+ * Returns the next struct resource image in *data, or NULL at end of walk / error.
+ */
 static struct resource *next_resource_uspace(const struct lemon_ctx *ctx,
                                               struct resource *cur,
-                                              struct resource *subtree_root,
-                                              __u8 **data)
+                                              __u8 **data,
+                                              int *err_out)
 {
     int err;
     struct resource *p = cur;
 
-    /* Go into children first */
+    /* Depth-first: child first if present. */
     if (p->child) {
         if ((err = read_kernel_memory((uintptr_t)p->child, sizeof(struct resource), data))) {
             ERR("Error reading child struct resource at %p", p->child);
+            *err_out = err;
             return NULL;
         }
         return (struct resource *)*data;
     }
 
-    /* Walk up until we find a sibling */
+    /* Climb to parent until a sibling exists or we hit the iomem root sentinel. */
     while (!p->sibling && p->parent) {
-        if (p->parent == subtree_root) /* BUG: (?) p->parent is a kernel-space pointer read from kernel memory, while subtree_root is &root, a user-space stack address*/
+        if ((uintptr_t)p->parent == ctx->iomem_resource)
             return NULL;
 
         if ((err = read_kernel_memory((uintptr_t)p->parent, sizeof(struct resource), data))) {
             ERR("Error reading parent struct resource at %p", p->parent);
+            *err_out = err;
             return NULL;
         }
         p = (struct resource *)*data;
@@ -261,19 +304,19 @@ static struct resource *next_resource_uspace(const struct lemon_ctx *ctx,
 
     if ((err = read_kernel_memory((uintptr_t)p->sibling, sizeof(struct resource), data))) {
         ERR("Error reading sibling struct resource at %p", p->sibling);
+        *err_out = err;
         return NULL;
     }
     return (struct resource *)*data;
 }
 
 /*
- * get_iomem_regions_kernel() - Parse struct resources directly in kernel to extract "System RAM" regions
- * @ram_regions: Pointer to store the extracted RAM regions
+ * get_iomem_regions_kernel() - Walk struct resource under iomem_resource via eBPF reads
+ * @ctx: Must have ctx->iomem_resource from kallsyms.
+ * @ram: Out: SYSTEM_RAM|BUSY regions.
+ * @not_ram: Out: other resource nodes under the tree.
  *
- * Read struct resources from kernel, and populates the provided
- * ram_regions struct with the start and end addresses of each region. The function
- * reallocates memory as needed to accommodate additional regions. 
- * Returns 0 on success, or an error code on failure.
+ * Returns 0 on success, or an error code if the tree cannot be read completely.
  */
 int get_iomem_regions_kernel(struct lemon_ctx *ctx, struct ram_regions *ram, struct ram_regions *not_ram)
 {
@@ -288,9 +331,9 @@ int get_iomem_regions_kernel(struct lemon_ctx *ctx, struct ram_regions *ram, str
         ERR("Error reading root struct resource");
         return err;
     }
-    memcpy(&root, data, sizeof(root));  /* save root for subtree boundary check */
+    memcpy(&root, data, sizeof(root));  /* Local copy: preserves child pointer before data is reused. */
 
-    /* Start from root->child */
+    /* No child nodes: resource tree is empty for this root. */
     if (!root.child)
         return 0;
 
@@ -301,12 +344,17 @@ int get_iomem_regions_kernel(struct lemon_ctx *ctx, struct ram_regions *ram, str
     }
     res = (struct resource *)data;
 
-    /* Walk the full tree: children + siblings, kernel-style */
+    /* Linearize the resource tree; walk_err catches mid-walk read_kernel_memory failures. */
+    int walk_err = 0;
     while (res) {
         if (!(range = range_new(res->start, res->end + 1, false))) {
+            int saved_errno = errno;
+            if (saved_errno)
                 ERRNO("Failed to allocate memory for new ranges");
-                return errno;
-            }
+            else
+                ERR("Invalid memory range from kernel resource: %llx-%llx", res->start, res->end);
+            return saved_errno ? saved_errno : EINVAL;
+        }
         /* Check for System RAM */
         if (res->name && ((res->flags & SYSTEM_RAM_FLAGS) == SYSTEM_RAM_FLAGS)) {
             TAILQ_INSERT_TAIL(ram, range, entries);
@@ -315,12 +363,15 @@ int get_iomem_regions_kernel(struct lemon_ctx *ctx, struct ram_regions *ram, str
             TAILQ_INSERT_TAIL(not_ram, range, entries);
         }
 
-        /* Advance to next node in the tree */
-        struct resource cur_copy = *res;    /* copy before data buffer is overwritten */
-        res = next_resource_uspace(ctx, &cur_copy, &root, &data);
+        /* Copy node fields: next read overwrites *data backing res. */
+        struct resource cur_copy = *res;
+        res = next_resource_uspace(ctx, &cur_copy, &data, &walk_err);
     }
 
-    /* Filter ranges to have non-overlapping ranges */
+    if (walk_err)
+        return walk_err;
+
+    /* Same post-processing as the /proc/iomem path. */
     tailq_sort(ram);
     tailq_sort(not_ram);
     range_merge_overlaps(ram);
@@ -329,9 +380,13 @@ int get_iomem_regions_kernel(struct lemon_ctx *ctx, struct ram_regions *ram, str
     return 0;
 }
 
-/* If the iomem_resource symbol is available access to it through eBPF bypassing CAP_SYS_ADMIN
-* Otherwise use /proc/iomem which requires CAP_SYS_ADMIN.
-*/
+/*
+ * parse_iomem() - Fill ctx->ram_regions from kernel tree or /proc/iomem
+ * @ctx: Uses iomem_resource and force_iomem_user to choose path.
+ *
+ * Moves the local `ram` head into ctx and fixes the list back-pointer.
+ * Returns status from get_iomem_regions_* (0 on success).
+ */
 int parse_iomem(struct lemon_ctx *restrict ctx) {
     int status;
     struct ram_regions ram, not_ram;
@@ -346,11 +401,17 @@ int parse_iomem(struct lemon_ctx *restrict ctx) {
     else
         status = get_iomem_regions_user(ctx, &ram, &not_ram);
 
-    
-    /* For now we copy the entire System RAM regions */
-    // range_subtract(&ctx->ram_regions, &ram, &not_ram);
-    // range_list_free(&ram);
-    memcpy(&ctx->ram_regions, &ram, sizeof(struct ram_regions));
+    /*
+     * Move local `ram` head into ctx->ram_regions by value copy, then fix the
+     * back-pointer of the first node so the head remains self-consistent.
+     * range_subtract() (commented out above) would be used here to carve out
+     * reserved regions; kept for future use.
+     */
+    ctx->ram_regions = ram;
+    if (TAILQ_EMPTY(&ctx->ram_regions))
+        TAILQ_INIT(&ctx->ram_regions);
+    else
+        TAILQ_FIRST(&ctx->ram_regions)->entries.tqe_prev = &ctx->ram_regions.tqh_first;
     range_list_free(&not_ram);
 
     return status;

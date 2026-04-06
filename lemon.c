@@ -11,6 +11,13 @@
 
 #include "lemon.h"
 
+/*
+ * lemon.c - CLI (argp), process setup, and main orchestration for LEMON.
+ *
+ * Loads eBPF, toggles kptr_restrict, discovers RAM regions, runs disk or network dump,
+ * restores sysctl, and prints a compatibility report block on stderr.
+ */
+
 extern int load_ebpf_mem_progs(struct lemon_ctx *restrict ctx);
 extern int init_translation(struct lemon_ctx *restrict ctx);
 extern int dump_on_disk(const struct lemon_ctx *restrict ctx);
@@ -32,8 +39,6 @@ const bool is_static = STATIC;
 struct err_trace_entry _err_trace[ERR_TRACE_MAX];
 int _err_trace_count = 0;
 
-// TODO: validate error paths and return values
-
 const char *lemon_banner =
 "+-------------------------------------------------------------------+\n"
 "|                                                                   |\n"
@@ -49,7 +54,7 @@ const char *lemon_banner =
 "|                                                                   |\n"
 "+-------------------------------------------------------------------+\n";
 
-/* Constants needed for argparse */
+/* argp option table: disk/network modes, dump tuning, and advanced switches. */
 static const struct argp_option options[] = {
     {0, 0, 0, OPTION_DOC, "Dump modes:", 1},
     {"disk",      'd', "PATH",          0, "Dump on disk", 1},
@@ -69,6 +74,7 @@ static const struct argp_option options[] = {
     {"qcom",      'q', 0,               0, "Force the use of Qualcomm quirks", 3},
     {"rphy",     'r', "ADDRESS:SIZE",  0, "Dump physical pages range", 3},
     {"rvirt",    'v', "ADDRESS:SIZE",  0, "Dump virtual pages range", 3},
+    {"testrun",  't', 0,               0, "Force the use of BPF_PROG_TEST_RUN as eBPF trigger", 3},
 
     {0}
 };
@@ -77,7 +83,7 @@ static const char doc[] = LEMON_DOC;
 /*
  * parse_mem_range() - Parses an "ADDR:SIZE" string into a mem_range.
  * @arg:   Input string in the form "ADDR:SIZE" (both values may be decimal or 0x-prefixed hex).
- * @range: Output mem_range where start = ADDR and end = ADDR + SIZE - 1.
+ * @range: Output mem_range with start = ADDR and end = ADDR + SIZE (half-open).
  *
  * Returns 0 on success, EINVAL if the format is invalid or parsing fails.
  */
@@ -87,18 +93,22 @@ static int parse_mem_range(const bool virtual, const char *arg, struct mem_range
     unsigned long long addr;
     unsigned long size;
 
+    /* "ADDR:SIZE" with optional 0x hex. */
     sep = strchr(arg, ':');
     if (!sep)
         return EINVAL;
 
+    errno = 0;
     addr = strtoull(arg, &endptr, 0);
-    if (endptr != sep)
+    if (errno == ERANGE || endptr != sep)
         return EINVAL;
 
+    errno = 0;
     size = strtoul(sep + 1, &endptr, 0);
-    if (*endptr != '\0' || size == 0)
+    if (errno == ERANGE || *endptr != '\0' || size == 0)
         return EINVAL;
 
+    /* mem_range uses half-open [start, end); end is first byte past the region. */
     range->start = addr;
     range->end   = addr + size;
     range->virtual = virtual;
@@ -122,8 +132,9 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
     struct in_addr addr;
     long port;
     char *end;
-    
+
     switch (key) {
+        /* --- Dump destination (mutually exclusive) --- */
         case 'd':
             if (opts->dump_mode != MODE_UNDEFINED) {
                  argp_error(state, "Options -d and -n are mutually exclusive");
@@ -144,6 +155,7 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
             opts->dump_mode = MODE_NETWORK;
             break;
 
+        /* --- Dump behavior --- */
         case 'f':
             opts->fatal = true;
             break;
@@ -169,10 +181,15 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
             opts->force_xdp = true;
             break;
 
+        case 't':
+            opts->force_test_run = true;
+            break;
+
         case 'u':
             opts->force_iomem_user = true;
             break;
         
+        /* --- Advanced / hardware --- */
         case 'g':
             opts->debug = true;
             break;
@@ -201,10 +218,13 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
                 argp_error(state, "Either disk mode or network mode must be specified");
             }
 
-            /* Qualcomm quirks is uncompatible with huge page */
+            /* Qualcomm path uses struct page metadata; incompatible with huge granule. */
             if (opts->use_huge_pages && opts->force_qualcomm) {
                 argp_error(state, "Qualcomm quirks are not possible using huge pages");
             }
+
+            if (opts->force_xdp && opts->force_test_run)
+                argp_error(state, "Options -x and -t are mutually exclusive");
             break;
         
         default:
@@ -214,18 +234,18 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
 }
 
 /*
- * check_kernel_version() - Checks if the running Linux kernel version support all the feature requested
- * Return:
- *   0 on success (version ok, or too-old warning printed internally)
- *   positive errno on failure
+ * check_kernel_version() - Parse uname.release and record ctx->kern_info
+ * @ctx: kern_info filled from uname(2).
+ *
+ * Warns if below MIN_MAJOR/MIN_MINOR but still returns 0.
+ * Returns 0 on success, or a positive errno-style code if uname fails.
  */
 static int check_kernel_version(struct lemon_ctx *restrict ctx) {
     struct utsname buffer;
     int major = 0, minor = 0, patch = 0;
 
     if (uname(&buffer) != 0) {
-        ERRNO("Fail to get Linux kernel version");
-        return errno;
+        RETURN_ERRNO("Fail to get Linux kernel version");
     }
     if(sscanf(buffer.release, "%d.%d.%d", &major, &minor, &patch) != 3) {
         ERR("Fail to parse Linux version");
@@ -241,13 +261,14 @@ static int check_kernel_version(struct lemon_ctx *restrict ctx) {
     return 0;
 }
 
-/**
- * Get an Android system property by running:
- *   getprop <name>
- * and capturing stdout.
+/*
+ * getprop_cmd() - Read one Android property via getprop(1)
+ * @ctx: Used only for DBG().
+ * @name: Property key (must be trusted / caller-supplied literal).
+ * @value: Out buffer, always NUL-terminated on success.
+ * @value_size: Size of @value including NUL.
  *
- * Returns 1 on success, 0 on failure.
- * Output is stored in 'value' (null-terminated, trimmed of newline).
+ * Returns 0 on success, or EINVAL/ENOENT/EIO on failure.
  */
 static int getprop_cmd(const struct lemon_ctx *restrict ctx, char *name, char *value, size_t value_size)
 {
@@ -257,26 +278,22 @@ static int getprop_cmd(const struct lemon_ctx *restrict ctx, char *name, char *v
     if (!name || !value || value_size == 0)
         return EINVAL;
 
-    /* Build the command string */
     snprintf(cmd, sizeof(cmd), "getprop %s", name);
 
     FILE *fp = popen(cmd, "r");
     if (!fp)
         return ENOENT;
 
-    /* Read first line of output */
+    /* getprop prints one line or nothing; treat EOF as missing property. */
     if (!fgets(buf, sizeof(buf), fp)) {
         pclose(fp);
         return EIO;
     }
     pclose(fp);
 
-    /* Strip trailing newline */
-    size_t len = strlen(buf);
-    if (len > 0 && buf[len - 1] == '\n')
-        buf[len - 1] = '\0';
+    buf[strcspn(buf, "\n")] = '\0';  /* Strip trailing newline if present. */
 
-    /* Empty string means property doesn't exist */
+    /* getprop returns an empty line for unset properties. */
     if (buf[0] == '\0')
         return EINVAL;
 
@@ -288,7 +305,12 @@ static int getprop_cmd(const struct lemon_ctx *restrict ctx, char *name, char *v
     return 0;
 }
 
-/* Look for mandatory android */
+/*
+ * collect_android_info() - Detect Android and fill manufacturer / SoC strings
+ * @ctx: Sets is_android and optional identity fields used by Qualcomm detection.
+ *
+ * Returns 0 on non-Android or on success; errno-style code if getprop_cmd fails.
+ */
 static int collect_android_info(struct lemon_ctx *restrict ctx) {
     int ret;
     ctx->is_android = access("/system/bin/getprop", X_OK) == 0 || access("/vendor/bin/getprop", X_OK) == 0;
@@ -307,55 +329,53 @@ static int collect_android_info(struct lemon_ctx *restrict ctx) {
     return 0;
 }
 
+/*
+ * init_context() - Zero ctx and apply defaults (empty RAM list, default port, kptr sentinel).
+ */
 static int init_context(struct lemon_ctx *restrict ctx) {
-    /* Initialize the context the context */
     memset(ctx, 0x00, sizeof(struct lemon_ctx));
 
-    /* Set default values */
     ctx->opts.dump_mode = MODE_UNDEFINED;
     ctx->opts.port = DEFAULT_PORT;
-    ctx->original_kptr = -1;
+    ctx->original_kptr = -1;    /* Sentinel: kptr not yet read. */
     TAILQ_INIT(&ctx->ram_regions);
 
     return 0;
 }
 
+/*
+ * collect_system_info() - Granule, Android props, caps, kernel version, eBPF capability hints
+ * @ctx: Populated for later stages and the compatibility report.
+ *
+ * Returns 0 (continues after kernel version errors with a warning).
+ */
 static int collect_system_info(struct lemon_ctx *restrict ctx) {
-    /* Collect system info*/
     int ret;
 
-    /* Set granule size for dump */
-    if(ctx->opts.use_huge_pages)
-        ctx->granule = HUGE_PAGE_SIZE;
-    else
-        ctx->granule = PAGE_SIZE;
- 
-    /* Init Android fields */
+    ctx->granule = ctx->opts.use_huge_pages ? HUGE_PAGE_SIZE : PAGE_SIZE;
+
     if((ret = collect_android_info(ctx))) {
         ERR("Error in Android init function");
         return ret;
     }
 
-    /* Get process capabilities */
+    /* Snapshot capabilities once; reused by every check_capability() call. */
     ctx->capabilities = cap_get_proc();
     if (ctx->capabilities == NULL) {
-        ERRNO("Fail to get process capabilities");
-        return errno;
+        RETURN_ERRNO("Fail to get process capabilities");
     }
 
-    /* Check if is running as root */
-    if(getuid() != 0) {
+    if(getuid() != 0)
         WARN("LEMON is not running as root. Try to continue anyway...");
-    }
-    else ctx->run_as_root = true;
-    
+    else
+        ctx->run_as_root = true;
 
-    /* Check Linux version */
+    /* Kernel version is informational; non-fatal if it can't be parsed. */
     if((ret = check_kernel_version(ctx))) {
-        WARN("Detected Linux version is not supported by LEMON. Minimum required version: %d.%d. Try to continue anyway...", MIN_MAJOR_LINUX, MIN_MINOR_LINUX);
+        ERR("Failed to determine kernel version (error %d). Continuing with incomplete info...", ret);
     }
 
-    /* Check if can load eBPF programs */
+    /* CAP_BPF or CAP_SYS_ADMIN required for bpf() syscall on kernels >= 5.8. */
     if((check_capability(ctx, CAP_BPF) != 1) && (check_capability(ctx, CAP_SYS_ADMIN) != 1)) {
         WARN("LEMON does not have CAP_BPF nor CAP_SYS_ADMIN to load the eBPF component. Try to continue anyway...");
     }
@@ -363,14 +383,20 @@ static int collect_system_info(struct lemon_ctx *restrict ctx) {
     return 0;
 }
 
+/*
+ * cleanup_context() - cap_free() and free all mem_range nodes in ram_regions
+ * @ctx: Must match the context used for the run.
+ *
+ * Returns 0 or errno from cap_free (range_list_free still runs).
+ */
 static int cleanup_context(struct lemon_ctx *ctx) {
     int ret = 0;
-    
+
     if(ctx->capabilities) {
-        if((ret = cap_free(ctx->capabilities))) {
+        if(cap_free(ctx->capabilities)) {
+            ret = errno;
             ERRNO("Fail to free capabilities struct");
-            return errno;
-        };
+        }
     }
 
     range_list_free(&ctx->ram_regions);
@@ -378,10 +404,18 @@ static int cleanup_context(struct lemon_ctx *ctx) {
     return ret;
 }
 
+/*
+ * init_socs_quirks() - SoC-specific setup (Qualcomm secure page / vmemmap).
+ */
 static int init_socs_quirks(struct lemon_ctx *ctx) {
     return check_init_qualcomm(ctx);
 }
 
+/*
+ * print_context_report() - Emit KEY=value lines for compatibility triage
+ * @ctx: Current run configuration and discovered hardware/kernel facts.
+ * @dump_status: Main return code (0 success, non-zero errno-style or EXIT_FAILURE).
+ */
 static void print_context_report(const struct lemon_ctx *restrict ctx, int dump_status) {
     const char *trigger_str;
     struct mem_range *range;
@@ -389,11 +423,13 @@ static void print_context_report(const struct lemon_ctx *restrict ctx, int dump_
     unsigned long long total_size = 0;
 
     switch (ctx->ebpf_trigger) {
-        case UPROBE: trigger_str = "uprobe"; break;
-        case XDP:    trigger_str = "xdp";    break;
-        default:     trigger_str = "none";   break;
+        case UPROBE:        trigger_str = "uprobe";   break;
+        case XDP:           trigger_str = "xdp";      break;
+        case PROG_TEST_RUN: trigger_str = "test_run"; break;
+        default:            trigger_str = "none";     break;
     }
 
+    /* Walk RAM list for TOTAL_RAM_SIZE; ranges are half-open [start,end). */
     TAILQ_FOREACH(range, &ctx->ram_regions, entries) {
         region_count++;
         total_size += range->end - range->start;
@@ -421,7 +457,7 @@ static void print_context_report(const struct lemon_ctx *restrict ctx, int dump_
         "GRANULE=%d\n"
         "DUMP_MODE=%s\n"
         "RAM_REGIONS=%d\n"
-        "TOTAL_RAM_SIZE=0x%llu\n",
+        "TOTAL_RAM_SIZE=%llu\n",
         lemon_version,
         architecture,
         binary_type,
@@ -473,12 +509,19 @@ static void print_context_report(const struct lemon_ctx *restrict ctx, int dump_
     fprintf(stderr, "--- 8< --- CUT HERE --- 8< ---\n");
 }
 
+/*
+ * main() - Parse argv, validate environment, run dump pipeline, always print report
+ * @argc: Standard argc.
+ * @argv: Standard argv.
+ *
+ * Returns dump status (0 on success, EXIT_FAILURE or errno-style on error paths).
+ */
 int main(int argc, char **argv) {
     struct lemon_ctx ctx;
     struct argp argp = {options, parse_opt, "", doc};
     int ret = EXIT_SUCCESS;
 
-    /* Init the main context */
+    /* Baseline ctx: defaults before argp mutates opts. */
     if(init_context(&ctx)) {
         ERR("Failed to initialize main context");
         return EXIT_FAILURE;
@@ -494,15 +537,17 @@ int main(int argc, char **argv) {
     /* Collect system info */
     if(collect_system_info(&ctx)) {
         ERR("Failed to collect system info");
-        return EXIT_FAILURE;
+        ret = EXIT_FAILURE;
+        goto cleanup;
     }
 
-    /* Check for eBPF support */
+    /* Probe bpf() syscall; ENOSYS means no eBPF in this kernel. */
     errno = 0;
     bpf_prog_load(BPF_PROG_TYPE_UNSPEC, NULL, NULL, NULL, 0, NULL);
-	if(errno == ENOSYS) {
+    if(errno == ENOSYS) {
         ERR("eBPF not supported by this kernel");
-        return EXIT_FAILURE;
+        ret = EXIT_FAILURE;
+        goto cleanup;
     }
 
     #ifdef CORE
@@ -510,7 +555,8 @@ int main(int argc, char **argv) {
         struct btf *vmlinux_btf = btf__load_vmlinux_btf();
         if (!vmlinux_btf) {
             ERR("eBPF CO-RE not supported by this kernel. Try to use no CO-RE version.");
-            return EXIT_FAILURE;
+            ret = EXIT_FAILURE;
+            goto cleanup;
         }
         btf__free(vmlinux_btf);
         ctx.is_core_supported = true;
@@ -525,7 +571,7 @@ int main(int argc, char **argv) {
     /* Determine the memory dumpable regions */
     if((ret = init_translation(&ctx))) goto cleanup;
 
-    /* Init SoCs quirks */
+    /* Qualcomm init returns 0 (skip), 1 (ok), or errno (>1) on hard failure. */
     if((ret = init_socs_quirks(&ctx)) > 1) goto cleanup;
 
     /* Dump on a file */
@@ -540,12 +586,12 @@ int main(int argc, char **argv) {
         if((ret = dump_on_net(&ctx))) goto cleanup;
     }
 
-    /* Cleanup: close BPF object */
     cleanup:
         cleanup_mem_ebpf();
 
-        /* Restore kptr_restrict if needed */
-        toggle_kptr(&ctx);
+        /* Second toggle_kptr restores original kptr_restrict after first call lowered it. */
+        if (ctx.original_kptr != -1)
+            toggle_kptr(&ctx);
 
         print_context_report(&ctx, ret);
 

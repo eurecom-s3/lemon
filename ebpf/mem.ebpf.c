@@ -1,3 +1,9 @@
+/*
+ * mem.ebpf.c - eBPF programs: uprobe and XDP triggers, mmapable result map.
+ *
+ * read_memory() validates and copies kernel bytes into read_mem_array_map for userspace.
+ */
+
 #ifdef CORE
     #include "../vmlinux.h"
     #include <bpf/bpf_core_read.h>
@@ -48,37 +54,35 @@ __attribute__((used)) static void __keep_config_syms(void) {  /* WORKAROUND for 
 }
 
 /*
- * read_memory() - Read kernel memory and save the content in the eBPF map
+ * read_memory() - Copy kernel bytes at @address into the mmapable BPF array map
+ * @address: Kernel virtual address to read.
+ * @dump_size: Number of bytes (clamped to HUGE_PAGE_SIZE in userspace policy).
  *
- * Attempts to read a specified chunk of kernel memory starting from a given address,
- * validating the request against architecture-specific constraints and dump size limits.
- * The memory contents are copied into a BPF map for retrieval from userspace.
- * Returns 0 on success or parameter validation failure, and -1 if the BPF map is unavailable.
- * Return also a specific error code in the map.
+ * On validation failure sets read_mem_result->ret_code to -EINVAL and returns 0.
+ * Returns -1 only if bpf_map_lookup_elem fails; otherwise 0 (probe return value).
  */
 static inline int read_memory(__u64 address, const __u64 dump_size) {
-    /* Get the map in which save the memory content to pass to userspace */
     int key = 0;
     struct read_mem_result *read_mem_result = bpf_map_lookup_elem(&read_mem_array_map, &key);
     if (!read_mem_result) {
         return -1;
     }
 
-    /* Validate dump size */
-    if (dump_size < 0 || dump_size > HUGE_PAGE_SIZE) {
+    /* dump_size is __u64; upper bound matches userspace granule. */
+    if (dump_size > HUGE_PAGE_SIZE) {
         read_mem_result->ret_code = -EINVAL;
         return 0;
     }
 
-    /* Ensure parameters are sanitized (some checks are needed to bypass eBPF type checking) */
+    /* Reject addresses that cannot be kernel pointers (unsigned compares on __u64). */
     #ifdef __TARGET_ARCH_x86
-        if (address < 0 || address < 0xff00000000000000){
+        if (address < 0xff00000000000000ULL){
     #elif __TARGET_ARCH_arm64
-        if (address < 0 || address < 0xfff0000000000000){
+        if (address < 0xfff0000000000000ULL){
     #else
-        if(true){
+        /* Unknown arch for this build: reject all addresses (legacy behavior). */
+        if (1){
     #endif
-    
         read_mem_result->ret_code = -EINVAL;
         return 0;
     }
@@ -94,15 +98,15 @@ static inline int read_memory(__u64 address, const __u64 dump_size) {
 }
 
 /*
- * read_kernel_memory_uprobe() - Read kernel memory using a Uprobe trigger 
+ * read_kernel_memory_uprobe() - Uprobe on userspace _read_kernel_memory()
+ * @ctx: pt_regs at uprobed entry (arguments are address, size).
  *
- * Uprobe handler for extracting kernel memory from userspace-triggered instrumentation.
- * Retrieves the target address and dump size from the probed function’s arguments,
+ * Pulls PARM1/PARM2 as the kernel VA and length, then read_memory().
  */
 SEC("uprobe//proc/self/exe:_read_kernel_memory")
 int read_kernel_memory_uprobe(struct pt_regs *ctx)
 {
-    /* Extract the first two arguments of the function */
+    /* Match the x86_64/arm64 argument passing convention for the stub. */
     #ifdef CORE
         __u64 address = (__u64)(PT_REGS_PARM1_CORE(ctx));
         __u64 dump_size = (__u64)(PT_REGS_PARM2_CORE(ctx));
@@ -111,7 +115,6 @@ int read_kernel_memory_uprobe(struct pt_regs *ctx)
         __u64 dump_size = (__u64)(PT_REGS_PARM2(ctx));
     #endif
 
-    /* Read memory! */
     return read_memory(address, dump_size);
 }
 
@@ -182,7 +185,6 @@ int read_kernel_memory_xdp(struct xdp_md* ctx) {
     __u64 address = args->addr;
     __u64 dump_size = args->size;
 
-    /* Read memory! */
     if (read_memory(address, dump_size)) {
         return XDP_DROP;
     }

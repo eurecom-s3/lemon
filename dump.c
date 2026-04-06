@@ -5,6 +5,10 @@
 
 #include "lemon.h"
 
+/*
+ * dump.c - LiME/raw memory dump: chunked reads, Qualcomm secure pages, progress on stderr.
+ */
+
 extern int read_kernel_memory(const uintptr_t addr, const size_t size, unsigned char **restrict data);
 extern uintptr_t phys_to_virt(const struct lemon_ctx *restrict ctx, uintptr_t phy_addr);
 extern bool qualcomm_is_secure_page(uintptr_t page_start);
@@ -13,24 +17,27 @@ const char fail_pattern[] = "LEMON FAIL READ ";
 const char qualcomm_pattern[] = "QUALCOMM SECURE ";
 
 /*
- * dump_region() - Reads a physical memory region and writes it to a destination in chunks.
- * @region_start: Start of the physical memory region to be dumped.
- * @region_end: End of the physical memory region to be dumped.
- * @granule: Preferred chunk size to use when reading memory.
- * @write_f: Callback function used to write the read memory somewhere (e.g., file, socket).
- * @args: Argument passed to the write function (e.g., file descriptor).
- * @fatal: If true, aborts the dump on any read error; otherwise, tries to recover or zero-fill.
+ * dump_region() - Read [region_start, region_end] in granule-sized chunks and write each chunk
+ * @region_start: First byte of the region.
+ * @region_end: Last byte of the region.
+ * @virtual: If false, phys_to_virt() before read_kernel_memory().
+ * @granule: Preferred chunk size (PAGE_SIZE after recursive shrink on error).
+ * @write_f: Sink for each chunk (disk or socket).
+ * @args: Opaque argument for @write_f.
+ * @nested: If true, skip progress percentage lines (recursive PAGE_SIZE retry).
  *
- * This function attempts to read memory between region_start and region_end in chunks
- * defined by `granule`. If a read fails and `fatal` is false, it retries with the smallest
- * allowed granule (system page size). If that also fails, it writes zero-filled data instead.
+ * On read failure with fatal=0: retry once at PAGE_SIZE; then fill fail_pattern in the
+ * mmap buffer or pass NULL to the writer for zero-fill. Qualcomm secure pages use
+ * qualcomm_pattern when read_data is available.
+ *
+ * Returns 0 on success, or the first error from read/write paths.
  */
 static int dump_region(const struct lemon_ctx *restrict ctx, uintptr_t region_start, const uintptr_t region_end, bool virtual, unsigned int granule, int (*write_f)(void *restrict, const void *restrict, const unsigned long), void *restrict args, bool nested) {
     int ret = 0;
     size_t chunk_size;
     uintptr_t chunk_start, chunk_end, region_size;
     unsigned char *read_data = NULL;
-    int last_printed_pct = -1;                          /* track last printed % */
+    int last_printed_pct = -1;  /* Last decade bucket printed (0,10,...,90). */
     region_size = (region_end - region_start + 1);
     chunk_start = region_start;
     uintptr_t virt;
@@ -50,10 +57,10 @@ static int dump_region(const struct lemon_ctx *restrict ctx, uintptr_t region_st
             }
         }
         else {
-                /* If simulated dump do not read the memory, dump file content undefined */
+                /* -y: skip read; writer may still allocate zero buffers. */
                 if(ctx->opts.simulate) goto bar;
 
-                if(!virtual) {  /* If physical address perform the traduction */
+                if(!virtual) {
                     virt = phys_to_virt(ctx, chunk_start);
                     ret = read_kernel_memory(virt, chunk_size, &read_data);
                 } else {
@@ -63,9 +70,10 @@ static int dump_region(const struct lemon_ctx *restrict ctx, uintptr_t region_st
 
                 if (ret) {
                     DBG("Error reading physical address 0x%lx (0x%lx) size: 0x%zx. Error code: %d", chunk_start, virt, chunk_size, ret);
-                    
+
                     if (ctx->opts.fatal) return ret;
-                    
+
+                    /* Retry smaller granule once before substituting fail_pattern / zeros. */
                     if (granule != PAGE_SIZE) {
                         ERR("Try to read it using the minimum page size available");
                         if ((ret = dump_region(ctx, chunk_start, chunk_end, virtual, PAGE_SIZE, write_f, args, true))) return ret;
@@ -114,27 +122,23 @@ static int dump_region(const struct lemon_ctx *restrict ctx, uintptr_t region_st
 }
 
 /*
- * dump() - Dumps the contents of system RAM using eBPF-assisted memory reading
- * @opts: Dumping options
- * @ctx->ram_regions: List of RAM regions to be dumped
- * @write_f: Callback function used to write data to the output
- * @args: User-provided context passed to the write callback
+ * dump() - For each ctx->ram_regions entry, optional LiME header then dump_region()
+ * @ctx: Options (raw, simulate, fatal, granule) and RAM list.
+ * @write_f: Per-chunk writer (see dump_on_disk / dump_on_net).
+ * @args: Opaque handle for @write_f (fd or net_args).
  *
- * Iterates through each system RAM region, writes a LiME header, reads the memory region
- * in chunks using eBPF, and writes the contents to the specified output.
- * On read failures, either aborts or fills the chunk with 0xFF, based on fatal mode.
+ * Returns 0 on success, or the first error from header or body writes.
  */
 int dump(const struct lemon_ctx *restrict ctx, int (*write_f)(void *restrict, const void *restrict, const unsigned long), void *restrict args) {
     int ret = 0;
     struct mem_range *range;
 
-    /* Loop through the system RAM ranges, read the memory ranges and write them on file */
     TAILQ_FOREACH(range, &ctx->ram_regions, entries)
     {
         const uintptr_t region_pstart = range->start;
         const uintptr_t region_pend = range->end - 1;
 
-        /* Write the LiMe header for that RAM region to the file (only if not RAW format)*/
+        /* LiME magic + span; skipped for -w raw dumps. */
         if(!ctx->opts.raw) {
             const lime_header header = {
                 .magic = 0x4C694D45,
@@ -144,7 +148,7 @@ int dump(const struct lemon_ctx *restrict ctx, int (*write_f)(void *restrict, co
                 .reserved = {0},
             };
 
-            if ((ret = write_f(args, &header, sizeof(lime_header))) > 0) {
+            if ((ret = write_f(args, &header, sizeof(lime_header)))) {
                 ERR("Error saving LiME header");
                 return ret;
             }

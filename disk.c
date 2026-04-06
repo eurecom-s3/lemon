@@ -8,14 +8,20 @@
 
 #include "lemon.h"
 
+/*
+ * disk.c - Write memory dumps to a local file (LiME/raw via dump()).
+ */
+
 extern int dump(const struct lemon_ctx *restrict ctx, int (*write_f)(void *restrict, const void *restrict, const unsigned long), void *restrict args);
 extern int check_capability(const struct lemon_ctx *restrict ctx, const cap_value_t cap);
 
 /*
- * write_on_disk() - Writes a memory chunks to the disk file descriptor
- * @args: Pointer to the file descriptor
- * @data: Pointer to the buffer to be written
- * @size: Number of bytes to write
+ * write_on_disk() - write(2) loop for dump(); optional zero-fill buffer when data is NULL
+ * @args: Pointer to int file descriptor.
+ * @data: Source buffer, or NULL to malloc and write zeros (size bytes).
+ * @size: Total bytes to write.
+ *
+ * Returns 0 on success, or errno on first unrecoverable write error.
  */
 static int write_on_disk(void *restrict args, const void *restrict data, const unsigned long size) {
     ssize_t r = 0;
@@ -23,12 +29,11 @@ static int write_on_disk(void *restrict args, const void *restrict data, const u
     void *dummy_buffer = NULL;
     int ret = 0;
 
-    /* If data is NULL or size is 0, allocate a dummy buffer to be written */
+    /* NULL data means the eBPF read was skipped or failed: write zeros instead. */
     if(data == NULL && size > 0) {
         dummy_buffer = malloc(size);
         if(dummy_buffer == NULL) {
-            ERRNO("Fail to allocate dummy buffer");
-            return errno;
+            RETURN_ERRNO("Fail to allocate dummy buffer");
         }
         memset(dummy_buffer, 0x00, size);
         data = dummy_buffer;
@@ -37,9 +42,10 @@ static int write_on_disk(void *restrict args, const void *restrict data, const u
     while(total < size) {
         r = write(*((int *)args), data + total, size - total);
         if(r == -1) {
-            if(errno == EINTR) continue;
-            ERRNO("Fail to write on dump file");
+            if(errno == EINTR)
+                continue;
             ret = errno;
+            ERRNO("Fail to write on dump file");
             goto cleanup;
         }
         
@@ -53,30 +59,26 @@ static int write_on_disk(void *restrict args, const void *restrict data, const u
 }
 
 /*
- * dump_on_disk() - Writes a memory dump to a file on disk
- * @opts: Dumping options, including output file path
- * @ram_regions: List of RAM regions to be dumped
+ * dump_on_disk() - open(2) path from ctx->opts.path, run dump(), fsync, close
+ * @ctx: Options and RAM regions (see dump()).
  *
- * Opens the specified file for writing, then performs the memory dump using the
- * generic dump function. Ensures data is flushed and file descriptor is closed.
+ * Preserves the first significant error across fsync/close failures.
+ * Returns 0 on success, or errno on failure.
  */
 int dump_on_disk(const struct lemon_ctx *restrict ctx) {
     int fd;
     int ret = 0;
 
-    /* Check CAP_DAC_OVERRIDE, creation of the file can fail without it */
+    /* Without CAP_DAC_OVERRIDE, open may fail if the directory is not owned by the caller. */
     if(check_capability(ctx, CAP_DAC_OVERRIDE) != 1) {
-        WARN("LEMON does not have CAP_DAC_OVERRIDE, it may fail in dump file creation\n");
+        WARN("LEMON does not have CAP_DAC_OVERRIDE, it may fail in dump file creation");
     }
 
-    /* Open dump file in write mode */
-    fd = open(ctx->opts.path, O_CREAT | O_WRONLY | O_TRUNC | S_IRUSR , S_IWUSR | S_IRGRP | S_IROTH);
+    fd = open(ctx->opts.path, O_CREAT | O_WRONLY | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
     if(fd < 0) {
-        ERRNO("Failed to open dump file for writing");
-        return errno;
+        RETURN_ERRNO("Failed to open dump file for writing");
     }
 
-    /* Dump! */
     ret = dump(ctx, write_on_disk, (void *)&fd);
 
     if(fsync(fd)) {
@@ -87,14 +89,14 @@ int dump_on_disk(const struct lemon_ctx *restrict ctx) {
                  */
                 break;
             default:
+                if (!ret) ret = errno;
                 ERRNO("Failed to finalize writes on dump file");
-                ret = errno;
         }
     }
 
     if(close(fd)) {
+        if (!ret) ret = errno;
         ERRNO("Failed to close the dump file");
-        ret = errno;
     }
 
     return ret;

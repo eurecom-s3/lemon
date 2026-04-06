@@ -3,27 +3,39 @@
 #include <bpf/btf.h>
 #include <bpf/libbpf.h>
 #include <unistd.h>
-#include <math.h>
 
 #include "../lemon.h"
 
+/*
+ * qcom.c - Qualcomm Android: locate vmemmap via mem_section, detect secure pages from struct page.
+ */
+
 extern int read_kernel_memory(const uintptr_t addr, const size_t size, unsigned char **restrict data);
 
-// as defined in kernel_platform/msm-kernel/drivers/soc/qcom/secure_buffer.c from Samsung Qualcomm source
+/* Magic in page.private for secure buffers (see Qcom secure_buffer.c in vendor trees). */
 #define SECURE_PAGE_MAGIC 0xEEEEEEEE
 
-// Defined in arch/arm64/include/asm/pgtable.h
+/* vmemmap base for pfn -> struct page (SPARSEMEM_VMEMMAP). */
 uintptr_t vmemmap;
 
-/* sizeof(struct page) from BTF */
+/* sizeof(struct page) from vmlinux BTF. */
 size_t struct_page_size;
 
-/* Offset of unsigned long private in struct page */
+/* Byte offset of page.private in struct page (BTF). */
 int private_offset;
 
-/* Page shift */
+/* ilog2(page size) for PFN math. */
 unsigned int page_shift;
 
+/*
+ * btf_find_field_recursive() - Find byte offset of a named member, including anonymous nesting
+ * @btf: Loaded vmlinux BTF.
+ * @type_id: Starting struct/union type id.
+ * @field_name: Member name to resolve.
+ * @base_offset_bits: Accumulated bit offset from outer anonymous wrappers.
+ *
+ * Returns byte offset from struct start, or -1 if not found.
+ */
 static int btf_find_field_recursive(struct btf *btf,
                                      __u32 type_id,
                                      const char *field_name,
@@ -35,7 +47,7 @@ static int btf_find_field_recursive(struct btf *btf,
 
     if (!t) return -1;
 
-    // Resolv modifiers
+    /* Strip typedef/const/volatile wrappers. */
     while (btf_is_mod(t) || btf_is_typedef(t)) {
         t = btf__type_by_id(btf, t->type);
         if (!t) return -1;
@@ -56,15 +68,13 @@ static int btf_find_field_recursive(struct btf *btf,
         else
             member_bit_off += m->offset;
 
-        // Match diretto
         if (name && name[0] != '\0') {
             if (strcmp(name, field_name) == 0)
                 return (int)(member_bit_off / 8);
         } else {
-            // Anonymous field recursive!
+            /* Anonymous struct/union member: search inside with accumulated offset. */
             const struct btf_type *mt = btf__type_by_id(btf, m->type);
-            
-            // Resolve modifiers
+
             while (mt && (btf_is_mod(mt) || btf_is_typedef(mt)))
                 mt = btf__type_by_id(btf, mt->type);
 
@@ -81,7 +91,12 @@ static int btf_find_field_recursive(struct btf *btf,
     return -1;
 }
 
-/* Return 0 if not qualcomm, 1 if qualcomm ok, positive errno (> 1) on error */
+/*
+ * check_init_qualcomm() - Enable Qualcomm mode and compute vmemmap from mem_section[]
+ * @ctx: Android + SoC strings, ram_regions, mem_section symbol, BTF/Core flags.
+ *
+ * Returns 0 if not applicable, 1 on success, or errno (e.g. EINVAL, ENOSYS) on failure.
+ */
 int check_init_qualcomm(struct lemon_ctx *restrict ctx) {
 
     struct btf *vmlinux_btf;
@@ -97,12 +112,12 @@ int check_init_qualcomm(struct lemon_ctx *restrict ctx) {
 
     page_shift = __builtin_ctz(getpagesize());
 
-    /* Check if the system is Android and based on a Qualcomm SoC */
+    /* Non-Qualcomm Android or non-Android: leave ctx->is_qualcomm false. */
     if(!ctx->is_android || (!strcasestr(ctx->soc_manufacturer, "Qualcomm") && !strcasestr(ctx->soc_manufacturer, "QTI"))) return 0;
     ctx->is_qualcomm = true;
-    INFO("Device use Qualcomm SoC");
+    INFO("Device uses Qualcomm SoC");
 
-    /* We support only CO-RE binaries and CONFIG_SPARSEMEM_VMEMMAP configurations */
+    /* Needs BTF relocation and vmemmap-backed struct page layout. */
     if(!ctx->is_core_supported || ctx->sparsemem_vmap_config != 'y') {
         ERR("Unsupported Qualcomm Kernel configuration. We support only CO-RE binaries and kernels with CONFIG_SPARSEMEM_VMEMMAP enabled");
         return ENOSYS;
@@ -135,14 +150,14 @@ int check_init_qualcomm(struct lemon_ctx *restrict ctx) {
     }
 
     struct_type = btf__type_by_id(vmlinux_btf, struct_id);
-    if (!struct_type || !struct_type->size) {
+    if (!struct_type || !struct_type->size) { /* size is __u32; == 0 means missing BTF info. */
         ERR("Invalid sizeof(struct page)");
         ret = EINVAL;
         goto cleanup;
     }
     struct_page_size = struct_type->size;
 
-    /* And now the offset of "unsigned long private" field */
+    /* Locate page.private; the SECURE_PAGE_MAGIC check reads this field. */
     offset = btf_find_field_recursive(vmlinux_btf, struct_id, "private", 0);
     if(offset < 0) {
         ERR("Invalid offset for private field of struct page");
@@ -160,13 +175,14 @@ int check_init_qualcomm(struct lemon_ctx *restrict ctx) {
     }
 
     struct_type = btf__type_by_id(vmlinux_btf, struct_id);
-    if (!struct_type || struct_type->size <= 0) {
+    if (!struct_type || !struct_type->size) {
         ERR("Invalid sizeof(mem_section)");
         ret = EINVAL;
         goto cleanup;
     }
     mem_section_size = struct_type->size;
 
+    /* section_mem_map encodes the vmemmap pointer ORed with flags; bit 0 is the present flag. */
     section_mem_map_offset = btf_find_field_recursive(vmlinux_btf, struct_id, "section_mem_map", 0);
     if(section_mem_map_offset < 0) {
         ERR("Invalid offset for section_mem_map field of struct mem_section");
@@ -174,28 +190,32 @@ int check_init_qualcomm(struct lemon_ctx *restrict ctx) {
         goto cleanup;
     }
 
-    /* We read the double array mem_section */
-    if(read_kernel_memory(ctx->mem_section, sizeof(uintptr_t), &data)) { /* mem_section ** address*/
+    /* mem_section is mem_section ** in the kernel image; dereference twice. */
+    if(read_kernel_memory(ctx->mem_section, sizeof(uintptr_t), &data)) { /* mem_section ** */
         ERR("Failed to access mem_section array (symbol)");
         ret = EIO;
         goto cleanup;
     }
 
-    if(read_kernel_memory(*(uintptr_t *)data, sizeof(uintptr_t), &data)) { /* mem_section * address */
+    if(read_kernel_memory(*(uintptr_t *)data, sizeof(uintptr_t), &data)) { /* mem_section * */
         ERR("Failed to access mem_section array (1st dereference)");
         ret = EIO;
         goto cleanup;
     }
 
-    /* mem_sections are associated to real System RAM regions and have inserted in order, so we have to test at least a sufficent
-       number of section to identify the vmemmap base
-    */
-
+    /*
+     * Scan early mem_section[] rows; section_mem_map encodes vmemmap | flags.
+     * PFN section size depends on page size (64K vs 4K kernels).
+     */
     pfn_section_shift = getpagesize() == 65536 ? 29 : 27;
-    min_section = ((TAILQ_FIRST(&ctx->ram_regions)->start) >> pfn_section_shift) + 2; /* We add two more */
+    if (TAILQ_EMPTY(&ctx->ram_regions)) {
+        ERR("No RAM regions available for mem_section analysis");
+        ret = ENODATA;
+        goto cleanup;
+    }
+    min_section = ((TAILQ_FIRST(&ctx->ram_regions)->start) >> pfn_section_shift) + 2;  /* small safety margin */
 
-    /* Read the array */
-    if(read_kernel_memory(*(uintptr_t *)data, min_section * mem_section_size, &data)) { /* mem_section[0] address */
+    if(read_kernel_memory(*(uintptr_t *)data, min_section * mem_section_size, &data)) { /* mem_section[0..] */
         ERR("Failed to read mem_section array");
         ret = EIO;
         goto cleanup;
@@ -203,9 +223,9 @@ int check_init_qualcomm(struct lemon_ctx *restrict ctx) {
 
     for(i=0; i < min_section; i++) {
         candidate = *(uintptr_t *)(data + i * mem_section_size + section_mem_map_offset);
-        if(!(candidate & 1)) continue;
+        if(!(candidate & 1)) continue; /* Bit 0 clear: section not present. */
 
-        vmemmap = candidate & 0xFFFFFFFFFFFFF000;
+        vmemmap = candidate & 0xFFFFFFFFFFFFF000; /* Mask out flag bits; keep page-aligned base. */
         break;
     }
     if(!vmemmap) {
@@ -222,7 +242,12 @@ int check_init_qualcomm(struct lemon_ctx *restrict ctx) {
     return ret;
 }
 
-
+/*
+ * qualcomm_is_secure_page() - True if struct page.private holds SECURE_PAGE_MAGIC
+ * @page_start: Physical base address of the page (dump granule aligned).
+ *
+ * On read failure logs and returns false (caller may attempt a normal memory read).
+ */
 bool qualcomm_is_secure_page(uintptr_t page_start) {
     unsigned long *private;
     uint8_t *data = NULL;
@@ -232,7 +257,7 @@ bool qualcomm_is_secure_page(uintptr_t page_start) {
     if (read_kernel_memory(addr, struct_page_size, &data)) {
         ERR("Failed to read struct pages for page 0x%lx (0x%lx)", page_start, addr);
         return false;
-    };
+    }
     private = (unsigned long *)(data + private_offset);
 
     return *private == SECURE_PAGE_MAGIC;
