@@ -4,6 +4,7 @@
 #include <sys/stat.h>
 #include <sys/capability.h>
 #include <string.h>
+#include <stdlib.h>
 
 #include "lemon.h"
 
@@ -19,6 +20,18 @@ extern int check_capability(const struct lemon_ctx *restrict ctx, const cap_valu
 static int write_on_disk(void *restrict args, const void *restrict data, const unsigned long size) {
     ssize_t r = 0;
     unsigned long total = 0;
+    void *dummy_buffer = NULL;
+
+    /* If data is NULL or size is 0, allocate a dummy buffer to be written */
+    if(data == NULL && size > 0) {
+        dummy_buffer = malloc(size);
+        if(dummy_buffer == NULL) {
+            ERRNO("Fail to allocate dummy buffer");
+            return errno;
+        }
+        memset(dummy_buffer, 0x00, size);
+        data = dummy_buffer;
+    }
 
     while(total < size) {
         r = write(*((int *)args), data + total, size - total);
@@ -30,6 +43,8 @@ static int write_on_disk(void *restrict args, const void *restrict data, const u
         
         total += r;
     }
+
+    if(dummy_buffer) free(dummy_buffer);
 
     return 0;
 }
@@ -52,7 +67,7 @@ int dump_on_disk(const struct lemon_ctx *restrict ctx) {
     }
 
     /* Open dump file in write mode */
-    fd = open(ctx->opts.path, O_CREAT | O_WRONLY, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+    fd = open(ctx->opts.path, O_CREAT | O_WRONLY | O_TRUNC | S_IRUSR, S_IWUSR | S_IRGRP | S_IROTH);
     if(fd < 0) {
         ERRNO("Failed to open dump file for writing");
         return errno;

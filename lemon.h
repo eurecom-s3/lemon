@@ -104,10 +104,10 @@ struct lemon_ctx {
         unsigned int run_as_root: 1;
         unsigned int is_android: 1;
         unsigned int is_core_supported: 1;
-        unsigned int sparsemem_vmap_config:1;
         unsigned int is_qualcomm:1;
     };
     enum ebpf_trigger ebpf_trigger;
+    char sparsemem_vmap_config;
 
     struct utsname kern_info;
     cap_t capabilities;
@@ -131,8 +131,6 @@ struct lemon_ctx {
     uintptr_t mem_section;
 
     // TODO: Add SELinux context info
-    // TODO: when qualcomm and other sok NO HUGE PAGE
 };
-
 
 #endif /* LEMON_H */

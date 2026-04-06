@@ -2,6 +2,7 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <string.h>
+#include <stdlib.h>
 
 #include "lemon.h"
 
@@ -24,18 +25,32 @@ int write_on_socket(void *restrict args, const void *restrict data, const unsign
     ssize_t r;
     unsigned long total;
     struct net_args *net_args = (struct net_args *)args;
+    void *dummy_buffer = NULL;
 
-        total = r = 0;
-        while(total < size) {
-            r = write(net_args->sockfd, data + total, size - total);
-            if(r == -1) {
-                if(errno == EINTR) continue;
-                ERRNO("Fail to write on socket");
-                return errno;
-            }
-            
-            total += r;
+    /* If data is NULL or size is 0, allocate a dummy buffer to be written */
+    if(data == NULL && size > 0) {
+        dummy_buffer = malloc(size);
+        if(dummy_buffer == NULL) {
+            perror("Fail to allocate dummy buffer");
+            return errno;
         }
+        memset(dummy_buffer, 0x00, size);
+        data = dummy_buffer;
+    }
+
+    total = r = 0;
+    while(total < size) {
+        r = write(net_args->sockfd, data + total, size - total);
+        if(r == -1) {
+            if(errno == EINTR) continue;
+            ERRNO("Fail to write on socket");
+            return errno;
+        }
+        
+        total += r;
+    }
+
+    if(dummy_buffer) free(dummy_buffer);
 
     return 0;
 }
@@ -68,6 +83,7 @@ int dump_on_net(const struct lemon_ctx *restrict ctx) {
     /* Connect to the destination */
     if ((ret = connect(sockfd, (struct sockaddr *)&dest_addr, sizeof(dest_addr))) < 0) {
         ERRNO("Fail to connect to remote host");
+        close(sockfd);
         return errno;
     }
 

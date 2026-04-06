@@ -9,7 +9,9 @@
 extern int read_kernel_memory(const uintptr_t addr, const size_t size, unsigned char **restrict data);
 extern uintptr_t phys_to_virt(const struct lemon_ctx *restrict ctx, uintptr_t phy_addr);
 extern bool qualcomm_is_secure_page(uintptr_t page_start);
-extern const char *qualcomm_pattern;
+
+const char fail_pattern[] = "LEMON FAIL READ ";
+const char qualcomm_pattern[] = "QUALCOMM SECURE ";
 
 /*
  * dump_region() - Reads a physical memory region and writes it to a destination in chunks.
@@ -41,12 +43,12 @@ static int dump_region(const struct lemon_ctx *restrict ctx, uintptr_t region_st
 
         if(ctx->is_qualcomm && qualcomm_is_secure_page(chunk_start))
         {
-            DBG("Skipping Qualcomm secure page 0x%lx", chunk_start);
-            // TODO IMPLEMENT ME CORRECTLY
-            // memcpy(read_data, qualcomm_pattern, 16);
-            // for (size_t i = sizeof(read_data); i < PAGE_SIZE; i <<= 1)
-            //     memcpy(read_data + i, read_data, i);
-            
+            DBG("Qualcomm secure page 0x%lx, filling with pattern", chunk_start);
+            if(read_data) {
+                for (size_t i = 0; i < chunk_size; i += sizeof(qualcomm_pattern) - 1)
+                    memcpy(read_data + i, qualcomm_pattern,
+                           (i + sizeof(qualcomm_pattern) - 1 <= chunk_size) ? sizeof(qualcomm_pattern) - 1 : chunk_size - i);
+            }
         }
         else {
                 /* If simulated dump do not read the memory, dump file content undefined */
@@ -71,8 +73,11 @@ static int dump_region(const struct lemon_ctx *restrict ctx, uintptr_t region_st
                         goto next_iter;
                     }
 
-                    // TODO REPLACE WITH "ERROR" PATTERN
-                    else memset(read_data, 0x00, chunk_size);
+                    else if(read_data) {
+                        for (size_t i = 0; i < chunk_size; i += sizeof(fail_pattern) - 1)
+                            memcpy(read_data + i, fail_pattern,
+                                   (i + sizeof(fail_pattern) - 1 <= chunk_size) ? sizeof(fail_pattern) - 1 : chunk_size - i);
+                    }
                 }
         }
         
@@ -140,7 +145,7 @@ int dump(const struct lemon_ctx *restrict ctx, int (*write_f)(void *restrict, co
                 .reserved = {0},
             };
 
-            if ((ret = write_f(args, &header, sizeof(lime_header))) < 0) {
+            if ((ret = write_f(args, &header, sizeof(lime_header))) > 0) {
                 ERR("Error saving LiME header");
                 return ret;
             }

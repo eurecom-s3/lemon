@@ -29,6 +29,23 @@ const char *binary_type = MODE;
 const char *lemon_version = LEMON_VERSION;
 const bool is_static = STATIC;
 
+// TODO: validate error paths and return values
+
+const char *lemon_banner =
+"+-------------------------------------------------------------------+\n"
+"|                                                                   |\n"
+"|             _      _____ __  __  ___  _   _                       |\n"
+"|            | |    | ____|  \\/  |/ _ \\| \\ | |                      |\n"
+"|            | |    |  _| | |\\/| | | | |  \\| |                      |\n"
+"|            | |___ | |___| |  | | |_| | |\\  |                      |\n"
+"|            |_____||_____|_|  |_|\\___/|_| \\_|                      |\n"
+"|                                                                   |\n"
+"|   An eBPF Memory Dump Tool for x64 and ARM64 Linux and Android    |\n"
+"|                                                                   |\n"
+"|   Created by Andrea Oliveri, Marco Cavenati and Stefano De Rosa   |\n"
+"|                                                                   |\n"
+"+-------------------------------------------------------------------+\n";
+
 /* Constants needed for argparse */
 static const struct argp_option options[] = {
     {0, 0, 0, OPTION_DOC, "Dump modes:", 1},
@@ -377,6 +394,7 @@ int main(int argc, char **argv) {
     /* Parse the arguments */
     argp_parse(&argp, argc, argv, 0, 0, &ctx.opts);
 
+    printf("%s", lemon_banner);
     /* Collect system info */
     if(collect_system_info(&ctx)) {
         ERR("Failed to collect system info");
@@ -385,8 +403,8 @@ int main(int argc, char **argv) {
 
     /* Check for eBPF support */
     errno = 0;
-    int bpf_ret = bpf_prog_load(BPF_PROG_TYPE_UNSPEC, NULL, NULL, NULL, 0, NULL);
-	if(bpf_ret <0 && errno == ENOSYS) {
+    bpf_prog_load(BPF_PROG_TYPE_UNSPEC, NULL, NULL, NULL, 0, NULL);
+	if(errno == ENOSYS) {
         ERR("eBPF not supported by this kernel");
         return EXIT_FAILURE;
     }
@@ -435,5 +453,5 @@ int main(int argc, char **argv) {
 
         cleanup_context(&ctx);
 
-    return ret; // TODO rework all the ret values handling
+    return ret;
 }

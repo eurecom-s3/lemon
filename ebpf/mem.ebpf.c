@@ -41,7 +41,7 @@ struct {
 } read_mem_array_map SEC(".maps");
 
 extern unsigned long CONFIG_ARM64_VA_BITS __kconfig __weak; /* VA bits for ARM64 */
-extern bool CONFIG_SPARSEMEM_VMEMMAP __kconfig __weak; /* Sparsemem VMEMMAP array configuration  */
+extern char CONFIG_SPARSEMEM_VMEMMAP __kconfig __weak; /* Sparsemem VMEMMAP array configuration  */
 __attribute__((used)) static void __keep_config_syms(void) {  /* WORKAROUND for LLVM */
     asm volatile("" : : "m"(CONFIG_ARM64_VA_BITS) : "memory");
     asm volatile("" : : "m"(CONFIG_SPARSEMEM_VMEMMAP) : "memory"); 
@@ -61,7 +61,7 @@ static inline int read_memory(__u64 address, const __u64 dump_size) {
     int key = 0;
     struct read_mem_result *read_mem_result = bpf_map_lookup_elem(&read_mem_array_map, &key);
     if (!read_mem_result) {
-        return -1; // We cannot catch this error...
+        return -1;
     }
 
     /* Validate dump size */
@@ -99,7 +99,7 @@ static inline int read_memory(__u64 address, const __u64 dump_size) {
  * Uprobe handler for extracting kernel memory from userspace-triggered instrumentation.
  * Retrieves the target address and dump size from the probed function’s arguments,
  */
-SEC("uprobe//proc/self/exe:read_kernel_memory")
+SEC("uprobe//proc/self/exe:_read_kernel_memory")
 int read_kernel_memory_uprobe(struct pt_regs *ctx)
 {
     /* Extract the first two arguments of the function */
@@ -147,25 +147,25 @@ int read_kernel_memory_xdp(struct xdp_md* ctx) {
         return XDP_DROP;
     }
 
-    /* Check if this is a UDP packet */
-    if (ip->protocol != IPPROTO_UDP) {
-        return XDP_PASS;
-    }
-
-    /* Check if source/dest is loopback */
-    if (ip->saddr != bpf_htonl(TRIGGER_PACKET_ADDR) ||  ip->daddr != bpf_htonl(TRIGGER_PACKET_ADDR)) {
-        return XDP_PASS;
-    }
-
     /* Validate IP header length */
     if (ip->ihl < 5) {
         return XDP_DROP;
+    }
+    
+    /* Check if this is a UDP packet */
+    if (ip->protocol != IPPROTO_UDP) {
+        return XDP_PASS;
     }
 
     /* Validate UDP header */
     struct udphdr *udp = (struct udphdr*)((char*)ip + (ip->ihl * 4));
     if ((void*)(udp + 1) > data_end) {
         return XDP_DROP;
+    }
+
+    /* Check if source/dest is loopback */
+    if (ip->saddr != bpf_htonl(TRIGGER_PACKET_ADDR) ||  ip->daddr != bpf_htonl(TRIGGER_PACKET_ADDR)) {
+        return XDP_PASS;
     }
 
     /* Check destination port */

@@ -24,10 +24,6 @@ int private_offset;
 /* Page shift */
 unsigned int page_shift;
 
-/* Placeholder in dump */
-const char *qualcomm_pattern = "QUALCOMM SECURE ";
-
-
 static int btf_find_field_recursive(struct btf *btf,
                                      __u32 type_id,
                                      const char *field_name,
@@ -107,7 +103,7 @@ int check_init_qualcomm(struct lemon_ctx *restrict ctx) {
     INFO("Device use Qualcomm SoC");
 
     /* We support only CO-RE binaries and CONFIG_SPARSEMEM_VMEMMAP configurations */
-    if(!ctx->is_core_supported) { // || !ctx->sparsemem_vmap_config) { TODO.....
+    if(!ctx->is_core_supported) { // || !ctx->sparsemem_vmap_config) { TODO: there is a bug in libbpf that does not load the CONFIG_SPARSEMEM_VMEMMAP symbol...
         ERR("Unsupported Qualcomm Kernel configuration. We support only CO-RE binaries and kernels with CONFIG_SPARSEMEM_VMEMMAP enabled");
         return -ENOSYS;
     }
