@@ -23,8 +23,31 @@
 #define DBG(msg, ...) do { if ((ctx->opts.debug) == true) fprintf(stderr, "[DBG] " msg "\n", ##__VA_ARGS__); } while (0)
 #define INFO(msg, ...) fprintf(stderr, "[INFO] " msg "\n", ##__VA_ARGS__)
 #define WARN(msg, ...) fprintf(stderr, "[WARNING] " msg "\n", ##__VA_ARGS__)
-#define ERR(msg, ...)  fprintf(stderr, "[ERROR] " msg "\n", ##__VA_ARGS__)
-#define ERRNO(msg, ...)  fprintf(stderr, "[ERROR] " msg ": %s\n", ##__VA_ARGS__, strerror(errno))
+#define ERR(msg, ...) do { \
+    fprintf(stderr, "[ERROR] " msg "\n", ##__VA_ARGS__); \
+    _err_trace_push(__func__, __FILE__, __LINE__); \
+} while (0)
+#define ERRNO(msg, ...) do { \
+    fprintf(stderr, "[ERROR] " msg ": %s\n", ##__VA_ARGS__, strerror(errno)); \
+    _err_trace_push(__func__, __FILE__, __LINE__); \
+} while (0)
+
+#define ERR_TRACE_MAX 16
+
+struct err_trace_entry {
+    const char *func;
+    const char *file;
+    int line;
+};
+
+extern struct err_trace_entry _err_trace[];
+extern int _err_trace_count;
+
+static inline void _err_trace_push(const char *func, const char *file, int line) {
+    if (_err_trace_count < ERR_TRACE_MAX)
+        _err_trace[_err_trace_count++] =
+            (struct err_trace_entry){ .func = func, .file = file, .line = line };
+}
 
 #ifndef TAILQ_FOREACH_SAFE
 #define TAILQ_FOREACH_SAFE(var, head, field, tvar)          \

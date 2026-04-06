@@ -29,6 +29,9 @@ const char *binary_type = MODE;
 const char *lemon_version = LEMON_VERSION;
 const bool is_static = STATIC;
 
+struct err_trace_entry _err_trace[ERR_TRACE_MAX];
+int _err_trace_count = 0;
+
 // TODO: validate error paths and return values
 
 const char *lemon_banner =
@@ -418,7 +421,7 @@ static void print_context_report(const struct lemon_ctx *restrict ctx, int dump_
         "GRANULE=%d\n"
         "DUMP_MODE=%s\n"
         "RAM_REGIONS=%d\n"
-        "TOTAL_RAM_SIZE=0x%\n",
+        "TOTAL_RAM_SIZE=0x%llu\n",
         lemon_version,
         architecture,
         binary_type,
@@ -457,11 +460,17 @@ static void print_context_report(const struct lemon_ctx *restrict ctx, int dump_
 
     fprintf(stderr,
         "DUMP_STATUS=%s\n"
-        "DUMP_ERROR=%d\n"
-        "--- 8< --- CUT HERE --- 8< ---\n",
+        "DUMP_ERROR=%d\n",
         dump_status == 0 ? "success" : "fail",
         dump_status
     );
+
+    fprintf(stderr, "ERROR_TRACE_COUNT=%d\n", _err_trace_count);
+    for (int i = 0; i < _err_trace_count; i++)
+        fprintf(stderr, "ERROR_TRACE_%d=%s:%s:%d\n",
+                i, _err_trace[i].func, _err_trace[i].file, _err_trace[i].line);
+
+    fprintf(stderr, "--- 8< --- CUT HERE --- 8< ---\n");
 }
 
 int main(int argc, char **argv) {
