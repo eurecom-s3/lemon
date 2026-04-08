@@ -214,10 +214,7 @@ int load_ebpf_mem_progs(struct lemon_ctx *restrict ctx) {
     int ret;
 
     #if defined(__TARGET_ARCH_arm64)
-        unsigned long vabits = 0;    
-        int map_fd, key;
-        struct bpf_map *kconfig_map;
-        struct config_values cfg_vals;
+        unsigned long vabits = 0;
     #endif
 
     /* libbpf may raise RLIMIT_MEMLOCK; warn if neither CAP_PERFMON nor CAP_SYS_ADMIN. */
@@ -238,30 +235,20 @@ int load_ebpf_mem_progs(struct lemon_ctx *restrict ctx) {
      * might not be available from config.gz so we try to compute it at runtime
      */
     #if defined(__TARGET_ARCH_arm64)
-        key = 0;
-        kconfig_map = bpf_object__find_map_by_name(mem_ebpf_skel->obj, ".kconfig");
-        if(!kconfig_map || \
-           ((map_fd = bpf_map__fd(kconfig_map)) < 0) || \
-           (bpf_map_lookup_elem(map_fd, &key, &cfg_vals))) {
-            WARN("No .kconfig section in eBPF program");
-            goto estimate;
-        }
-
-        ctx->sparsemem_vmap_config = cfg_vals.CONFIG_SPARSEMEM_VMEMMAP;
+        ctx->sparsemem_vmap_config = mem_ebpf_skel->kconfig->CONFIG_SPARSEMEM_VMEMMAP;
         DBG("CONFIG_SPARSEMEM_VMEMMAP %c", ctx->sparsemem_vmap_config);
-        ctx->va_bits_config = cfg_vals.CONFIG_ARM64_VA_BITS;
+        ctx->va_bits_config = mem_ebpf_skel->kconfig->CONFIG_ARM64_VA_BITS;
         DBG("CONFIG_ARM64_VA_BITS %lu", ctx->va_bits_config);
         if(ctx->va_bits_config)
             ctx->va_bits = ctx->va_bits_config;
         else {
-            estimate:
-                vabits = arm64_vabits_actual();
-                if (vabits == 0) {
-                    WARN("Failed to determine runtime virtual address bits, defaulting to 48");
-                    vabits = 48;
-                }
-                DBG("Estimated va_bits %lu", vabits);
-                ctx->va_bits = vabits;
+            vabits = arm64_vabits_actual();
+            if (vabits == 0) {
+                WARN("Failed to determine runtime virtual address bits, defaulting to 48");
+                vabits = 48;
+            }
+            DBG("Estimated va_bits %lu", vabits);
+            ctx->va_bits = vabits;
         }
         DBG("va_bits %lu", ctx->va_bits);
     #endif

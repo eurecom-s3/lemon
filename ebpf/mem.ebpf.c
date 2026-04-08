@@ -48,10 +48,11 @@ struct {
 
 extern unsigned long CONFIG_ARM64_VA_BITS __kconfig __weak; /* VA bits for ARM64 */
 extern char CONFIG_SPARSEMEM_VMEMMAP __kconfig __weak; /* Sparsemem VMEMMAP array configuration  */
-__attribute__((used)) static void __keep_config_syms(void) {  /* WORKAROUND for LLVM */
-    asm volatile("" : : "m"(CONFIG_ARM64_VA_BITS) : "memory");
-    asm volatile("" : : "m"(CONFIG_SPARSEMEM_VMEMMAP) : "memory"); 
-}
+/* Prevent LLVM from removing kconfigs it thinks are unused.
+ * They are actually used through the skeleton in userspace.
+ */
+static void *__keep_CONFIG_ARM64_VA_BITS __attribute__((used)) = &CONFIG_ARM64_VA_BITS;
+static void *__keep_CONFIG_SPARSEMEM_VMEMMAP __attribute__((used)) = &CONFIG_SPARSEMEM_VMEMMAP;
 
 /*
  * read_memory() - Copy kernel bytes at @address into the mmapable BPF array map
