@@ -50,7 +50,7 @@ Provide detailed environment information.
 
 Provide a minimal, reproducible sequence when possible:
 
-1. Setup environment (device specs, kernel version, dependencies)
+1. Setup environment (device specs, dependencies)
 2. Compile/build LEMON - optional
 3. Run command(s)
 4. Observe failure
@@ -60,7 +60,7 @@ Provide a minimal, reproducible sequence when possible:
 
 Please include when possible inside code blocks:
 
-- Full terminal output
-- `last_kmesg` logs (or dumpstate file located under `/data/log` if samsung)
+- Full terminal output of lemon run with the `--debug` option
+- When available, `last_kmesg` logs (or dumpstate file located under `/data/log` if samsung)
 - Build/compile logs
 - Any stack traces or error messages
