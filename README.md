@@ -95,3 +95,15 @@ Other distributions provide equivalent packages, which at minimum allow compilin
 - Android 13 support BTF 5.15
 - Introduction of SYSCALL program type 5.15
 - Introduction of kallsyms() in ebpf 5.16
+
+### Related Projects
+
+The following additional tools can be used to enable memory analysis of Linux and Android devices:
+
+- [btf2json](https://github.com/eurecom-s3/lemon-btf2json)  
+  Converts Linux BTF debug information into JSON profiles compatible with Volatility 3.
+
+- [volatility3-arm64](https://github.com/eurecom-s3/volatility3-arm64)  
+  Extended version of Volatility 3 with support for ARM64 memory analysis.
+
+These components are used together with LEMON to generate and analyze memory dumps on modern Android and Linux systems
