@@ -16,16 +16,16 @@ extern int read_kernel_memory(const uintptr_t addr, const size_t size, unsigned 
 #define SECURE_PAGE_MAGIC 0xEEEEEEEE
 
 /* vmemmap base for pfn -> struct page (SPARSEMEM_VMEMMAP). */
-uintptr_t vmemmap;
+static uintptr_t vmemmap;
 
 /* sizeof(struct page) from vmlinux BTF. */
-size_t struct_page_size;
+static size_t struct_page_size;
 
 /* Byte offset of page.private in struct page (BTF). */
-int private_offset;
+static int private_offset;
 
 /* ilog2(page size) for PFN math. */
-unsigned int page_shift;
+static unsigned int page_shift;
 
 /*
  * btf_find_field_recursive() - Find byte offset of a named member, including anonymous nesting
