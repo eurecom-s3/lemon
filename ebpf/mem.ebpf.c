@@ -51,9 +51,10 @@ extern char CONFIG_SPARSEMEM_VMEMMAP __kconfig __weak; /* Sparsemem VMEMMAP arra
 /* Prevent LLVM from removing kconfigs it thinks are unused.
  * They are actually used through the skeleton in userspace.
  */
-static void *__keep_CONFIG_ARM64_VA_BITS __attribute__((used)) = &CONFIG_ARM64_VA_BITS;
-static void *__keep_CONFIG_SPARSEMEM_VMEMMAP __attribute__((used)) = &CONFIG_SPARSEMEM_VMEMMAP;
-
+__attribute__((used)) static void __keep_config_syms(void) {
+    asm volatile("" : : "m"(CONFIG_ARM64_VA_BITS) : "memory");
+    asm volatile("" : : "m"(CONFIG_SPARSEMEM_VMEMMAP) : "memory"); 
+}
 /*
  * read_memory() - Copy kernel bytes at @address into the mmapable BPF array map
  * @address: Kernel virtual address to read.
