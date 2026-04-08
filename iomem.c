@@ -153,8 +153,11 @@ static void range_merge_overlaps(struct ram_regions *list) {
  * @ctx: Destination queue for resulting gaps.
  * @ram: System RAM intervals.
  * @not_ram: Reserved / non-RAM intervals to carve out.
+ * 
+ *  This function is not currently in use. Filtering for annidated reserved regions seems to be usefull
+ *  to prevent crashes in other SoCs such as Mediatek and Exynos in Samsung phones.
  */
-static void range_subtract(struct lemon_ctx *ctx, struct ram_regions *ram, struct ram_regions *not_ram) {
+static __attribute__((unused)) void range_subtract(struct lemon_ctx *ctx, struct ram_regions *ram, struct ram_regions *not_ram) {
     struct mem_range *g = TAILQ_FIRST(ram);
     struct mem_range *b = TAILQ_FIRST(not_ram);
 
