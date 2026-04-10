@@ -580,8 +580,6 @@ static int parse_kallsyms(struct lemon_ctx *restrict ctx) {
                 return errno;
             }
 
-
-
             strncpy(ctx->linux_banner, (char *)data, linux_banner_len);
             
             DBG("Linux banner 0x%s", ctx->linux_banner);
