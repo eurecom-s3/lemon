@@ -399,6 +399,8 @@ static int cleanup_context(struct lemon_ctx *ctx) {
         }
     }
 
+    if(ctx->linux_banner) free(ctx->linux_banner);
+
     range_list_free(&ctx->ram_regions);
 
     return ret;
@@ -445,6 +447,7 @@ static void print_context_report(const struct lemon_ctx *restrict ctx, int dump_
         "BUILD_MODE=%s\n"
         "STATIC=%d\n"
         "KERNEL_RELEASE=%s\n"
+        "BANNER=%s\n"
         "RUN_AS_ROOT=%u\n"
         "ANDROID=%u\n"
         "QUALCOMM=%u\n"
@@ -463,6 +466,7 @@ static void print_context_report(const struct lemon_ctx *restrict ctx, int dump_
         binary_type,
         is_static,
         ctx->kern_info.release,
+        ctx->linux_banner ? ctx->linux_banner : "",
         ctx->run_as_root,
         ctx->is_android,
         ctx->is_qualcomm,

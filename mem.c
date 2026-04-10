@@ -496,6 +496,7 @@ static int parse_kallsyms(struct lemon_ctx *restrict ctx) {
     __u8 *data = NULL;
     uintptr_t current_symb_addr = 0;
     int err;
+    size_t linux_banner_len;
 
     /* uintptr_t and int64_t must match for mixed x86/arm offset reads. */
     _Static_assert(sizeof(uintptr_t) == sizeof(int64_t), "sizeof(uintptr_t) != sizeof(int64_t)");
@@ -521,7 +522,7 @@ static int parse_kallsyms(struct lemon_ctx *restrict ctx) {
     while (fgets(line, sizeof(line), fp)) {
 
         /* Early exit once iomem root, phys offset, and mem_section are known. */
-        if(ctx->iomem_resource && ctx->v2p_offset && ctx->mem_section) break;
+        if(ctx->iomem_resource && ctx->v2p_offset && ctx->mem_section && ctx->linux_banner) break;
 
         /* Root of kernel struct resource tree (optional path for RAM discovery). */
         if(!ctx->iomem_resource && parse_kallsyms_line(line, "iomem_resource", &current_symb_addr)) {
@@ -551,6 +552,33 @@ static int parse_kallsyms(struct lemon_ctx *restrict ctx) {
         if(!ctx->mem_section && parse_kallsyms_line(line, "mem_section", &current_symb_addr)) {
             ctx->mem_section = current_symb_addr;
             DBG("mem_section 0x%lx", ctx->mem_section);
+            continue;
+        }
+
+        /* Get the Linux banner string */
+        if(!ctx->linux_banner && parse_kallsyms_line(line, "linux_banner", &current_symb_addr)) {
+            if((err = read_kernel_memory(current_symb_addr, MAX_LINUX_BANNER_LEN, &data))) {
+                fclose(fp);
+                return err;
+            }
+            
+            linux_banner_len = strnlen((char *)data, MAX_LINUX_BANNER_LEN);
+            if(!linux_banner_len) {
+                ERR("Linux banner has 0 len");
+                fclose(fp);
+                return EINVAL;
+            }
+
+            ctx->linux_banner = (char *)malloc(linux_banner_len + 1);
+            if(!ctx->linux_banner) {
+                ERR("Fail allocating Linux banner buffer");
+                fclose(fp);
+                return errno;
+            }
+
+            strncpy(ctx->linux_banner, (char *)data, linux_banner_len);
+
+            DBG("Linux banner 0x%s", ctx->linux_banner);
             continue;
         }
 

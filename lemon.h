@@ -26,6 +26,7 @@
 
 #define PROP_VALUE_MAX          92      /* Android property value limit (system default). */
 #define MAX_INFO_FIELD          256     /* Max bytes for device identity strings in lemon_ctx. */
+#define MAX_LINUX_BANNER_LEN    4096
 
 /*
  * Logging macros.
@@ -194,6 +195,7 @@ struct lemon_ctx {
     int original_kptr;      /* kptr_restrict value at first toggle_kptr() call; -1 if not yet read. */
     unsigned long va_bits;          /* Effective VA bit width (from .kconfig or runtime probe). */
     unsigned long va_bits_config;   /* CONFIG_ARM64_VA_BITS from .kconfig (0 if absent). */
+    char *linux_banner;     /* Linux banner needed to create a valid profile */
 
     /* Physical-to-virtual offset: x86_64 uses unsigned linear-map base; arm64 uses signed memstart_addr. */
     #ifdef __TARGET_ARCH_x86
