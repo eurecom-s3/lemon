@@ -562,6 +562,10 @@ static int parse_kallsyms(struct lemon_ctx *restrict ctx) {
                 return err;
             }
             
+            /* Banner ends with  new line, we replace it with a NULL */
+            char *newline = strchr((char *)data, '\n');
+            if(newline) *newline = '\0';
+
             linux_banner_len = strnlen((char *)data, MAX_LINUX_BANNER_LEN);
             if(!linux_banner_len) {
                 ERR("Linux banner has 0 len");
@@ -576,8 +580,10 @@ static int parse_kallsyms(struct lemon_ctx *restrict ctx) {
                 return errno;
             }
 
-            strncpy(ctx->linux_banner, (char *)data, linux_banner_len);
 
+
+            strncpy(ctx->linux_banner, (char *)data, linux_banner_len);
+            
             DBG("Linux banner 0x%s", ctx->linux_banner);
             continue;
         }
