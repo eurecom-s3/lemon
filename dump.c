@@ -37,17 +37,14 @@ static int dump_region(const struct lemon_ctx *restrict ctx, uintptr_t region_st
     const size_t region_size = (region_end - region_start + 1);
     
     int ret = 0;
-    size_t chunk_size;
-    uintptr_t chunk_start, chunk_end;
+    uintptr_t chunk_start = region_start;
     const unsigned char *read_data = NULL;
     int last_printed_pct = -1;  /* Last ten bucket printed (0,10,...,90). */
-    chunk_start = region_start;
-    uintptr_t virt;
 
     while (chunk_start <= region_end) {
         /* Read memory region in chunks of maximum granule bytes */
-        chunk_end = (region_end - chunk_start + 1 > granule) ? chunk_start + granule - 1 : region_end;
-        chunk_size = chunk_end - chunk_start + 1;
+        const uintptr_t chunk_end = (region_end - chunk_start + 1 > granule) ? chunk_start + granule - 1 : region_end;
+        const size_t chunk_size = chunk_end - chunk_start + 1;
 
         if(ctx->is_qualcomm && qualcomm_is_secure_page(chunk_start))
         {
@@ -55,31 +52,26 @@ static int dump_region(const struct lemon_ctx *restrict ctx, uintptr_t region_st
             fill_mem_result_buf(qualcomm_pattern, sizeof(qualcomm_pattern) - 1, chunk_size, &read_data);
         }
         else {
-                /* -y: skip read; writer may still allocate zero buffers. */
-                if(ctx->opts.simulate) goto bar;
+            /* -y: skip read; writer may still allocate zero buffers. */
+            if(ctx->opts.simulate) goto bar;
 
-                if(!virtual) {
-                    virt = phys_to_virt(ctx, chunk_start);
-                    ret = read_kernel_memory(virt, chunk_size, &read_data);
-                } else {
-                    virt = chunk_start;
-                    ret = read_kernel_memory(chunk_start, chunk_size, &read_data);
+            const uintptr_t virt = virtual ? chunk_start : phys_to_virt(ctx, chunk_start);
+            ret = read_kernel_memory(virt, chunk_size, &read_data);
+
+            if (ret) {
+                DBG("Error reading physical address 0x%lx (0x%lx) size: 0x%zx. Error code: %d", chunk_start, virt, chunk_size, ret);
+
+                if (ctx->opts.fatal) return ret;
+
+                /* Retry smaller granule once before substituting fail_pattern / zeros. */
+                if (granule != PAGE_SIZE) {
+                    ERR("Try to read it using the minimum page size available");
+                    if ((ret = dump_region(ctx, chunk_start, chunk_end, virtual, PAGE_SIZE, write_f, args, true))) return ret;
+                    goto next_iter;
                 }
 
-                if (ret) {
-                    DBG("Error reading physical address 0x%lx (0x%lx) size: 0x%zx. Error code: %d", chunk_start, virt, chunk_size, ret);
-
-                    if (ctx->opts.fatal) return ret;
-
-                    /* Retry smaller granule once before substituting fail_pattern / zeros. */
-                    if (granule != PAGE_SIZE) {
-                        ERR("Try to read it using the minimum page size available");
-                        if ((ret = dump_region(ctx, chunk_start, chunk_end, virtual, PAGE_SIZE, write_f, args, true))) return ret;
-                        goto next_iter;
-                    }
-
-                    fill_mem_result_buf(fail_pattern, sizeof(fail_pattern) - 1, chunk_size, &read_data);
-                }
+                fill_mem_result_buf(fail_pattern, sizeof(fail_pattern) - 1, chunk_size, &read_data);
+            }
         }
         
         /* Save the chunk */
