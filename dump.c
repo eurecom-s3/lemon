@@ -9,7 +9,8 @@
  * dump.c - LiME/raw memory dump: chunked reads, Qualcomm secure pages, progress on stderr.
  */
 
-extern int read_kernel_memory(const uintptr_t addr, const size_t size, unsigned char **restrict data);
+extern int read_kernel_memory(const uintptr_t addr, const size_t size, const unsigned char **restrict data);
+extern int fill_mem_result_buf(const char* pattern, size_t pattern_size, size_t chunk_size, const __u8 **restrict data);
 extern uintptr_t phys_to_virt(const struct lemon_ctx *restrict ctx, uintptr_t phy_addr);
 extern bool qualcomm_is_secure_page(uintptr_t page_start);
 
@@ -33,12 +34,13 @@ const char qualcomm_pattern[] = "QUALCOMM SECURE ";
  * Returns 0 on success, or the first error from read/write paths.
  */
 static int dump_region(const struct lemon_ctx *restrict ctx, uintptr_t region_start, const uintptr_t region_end, bool virtual, unsigned int granule, int (*write_f)(void *restrict, const void *restrict, const unsigned long), void *restrict args, bool nested) {
+    const size_t region_size = (region_end - region_start + 1);
+    
     int ret = 0;
     size_t chunk_size;
-    uintptr_t chunk_start, chunk_end, region_size;
-    unsigned char *read_data = NULL;
-    int last_printed_pct = -1;  /* Last decade bucket printed (0,10,...,90). */
-    region_size = (region_end - region_start + 1);
+    uintptr_t chunk_start, chunk_end;
+    const unsigned char *read_data = NULL;
+    int last_printed_pct = -1;  /* Last ten bucket printed (0,10,...,90). */
     chunk_start = region_start;
     uintptr_t virt;
 
@@ -50,11 +52,7 @@ static int dump_region(const struct lemon_ctx *restrict ctx, uintptr_t region_st
         if(ctx->is_qualcomm && qualcomm_is_secure_page(chunk_start))
         {
             DBG("Qualcomm secure page 0x%lx, filling with pattern", chunk_start);
-            if(read_data) {
-                for (size_t i = 0; i < chunk_size; i += sizeof(qualcomm_pattern) - 1)
-                    memcpy(read_data + i, qualcomm_pattern,
-                           (i + sizeof(qualcomm_pattern) - 1 <= chunk_size) ? sizeof(qualcomm_pattern) - 1 : chunk_size - i);
-            }
+            fill_mem_result_buf(qualcomm_pattern, sizeof(qualcomm_pattern) - 1, chunk_size, &read_data);
         }
         else {
                 /* -y: skip read; writer may still allocate zero buffers. */
@@ -80,11 +78,7 @@ static int dump_region(const struct lemon_ctx *restrict ctx, uintptr_t region_st
                         goto next_iter;
                     }
 
-                    else if(read_data) {
-                        for (size_t i = 0; i < chunk_size; i += sizeof(fail_pattern) - 1)
-                            memcpy(read_data + i, fail_pattern,
-                                   (i + sizeof(fail_pattern) - 1 <= chunk_size) ? sizeof(fail_pattern) - 1 : chunk_size - i);
-                    }
+                    fill_mem_result_buf(fail_pattern, sizeof(fail_pattern) - 1, chunk_size, &read_data);
                 }
         }
         

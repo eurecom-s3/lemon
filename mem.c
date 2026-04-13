@@ -1,5 +1,6 @@
 #include <arpa/inet.h>
 #include <bpf/bpf.h>
+#include <errno.h>
 #include <net/if.h>
 #include <sys/stat.h>
 #include <sys/mman.h>
@@ -431,17 +432,27 @@ static int send_test_run_packet(const uintptr_t addr, const size_t size) {
  * Marked noinline/optnone so the uprobe attachment target remains stable.
  * Returns read_mem_result->ret_code (may be negative from the eBPF helper).
  */
-static int __attribute__((noinline, optnone)) _read_kernel_memory(const uintptr_t addr, const size_t size, __u8 **restrict data) {
-    if (active_trigger == XDP) {
-        int ret = send_udp_trigger_packet(addr, size);
-        if (ret) { read_mem_result->ret_code = ret; goto out; }
-    } else if (active_trigger == PROG_TEST_RUN) {
-        int ret = send_test_run_packet(addr, size);
-        if (ret) { read_mem_result->ret_code = ret; goto out; }
-    }
-    /* UPROBE: eBPF already ran at entry; ret_code was set in-kernel. */
+static int __attribute__((noinline, optnone)) _read_kernel_memory(const uintptr_t addr, const size_t size, const __u8 **restrict data) {
+    int ret = 0;
 
-out:
+    switch (active_trigger) {
+        case UPROBE:
+            /* UPROBE: eBPF already ran at entry; ret_code was set in-kernel. */
+            break;
+        case XDP:
+            ret = send_udp_trigger_packet(addr, size);
+            break;
+        case PROG_TEST_RUN:
+            ret = send_test_run_packet(addr, size);
+            break;
+        default:
+            ret = EINVAL;
+    }
+
+    if (ret) {
+        read_mem_result->ret_code = ret;
+    }
+
     *data = read_mem_result->buf;
     return read_mem_result->ret_code;
 }
@@ -454,7 +465,7 @@ out:
  *
  * Negative kernel codes are returned as positive errno-style values for callers.
  */
- int read_kernel_memory(const uintptr_t addr, const size_t size, __u8 **restrict data) {
+ int read_kernel_memory(const uintptr_t addr, const size_t size, const unsigned char **restrict data) {
     /* Default if the map was never attached correctly. */
     read_mem_result->ret_code = -EINVAL;
 
@@ -462,6 +473,31 @@ out:
     return rc < 0 ? -rc : rc;
  }
 
+/*
+ * fill_mem_result_buf() - Fill the eBPF-userspace buffer with a user supplied pattern
+ * @pattern: Pattern to be copied repeatedly.
+ * @pattern_size: Size of the pattern.
+ * @chunk_size: Portion of mem_result->buf to be filled.
+ * @data: Out: pointer to mmap-backed buffer filled by eBPF.
+ * 
+ * The provided pattern is copied repeatedly in mem_result->buf.
+ */
+int fill_mem_result_buf(const char* pattern, size_t pattern_size, size_t chunk_size, const unsigned char **restrict data) {
+    if(!read_mem_result) {
+        return ENOENT;
+    }
+
+    if(chunk_size > sizeof(read_mem_result->buf)) {
+        return EINVAL;
+    }
+
+    for (size_t i = 0; i < chunk_size; i += pattern_size) {
+        const size_t size = (i + pattern_size <= chunk_size) ? pattern_size : chunk_size - i;
+        memcpy(read_mem_result->buf + i, pattern, size);
+    }
+
+    return 0;
+}
 /*
  * parse_kallsyms_line() - Parse one /proc/kallsyms line for a given symbol name
  * @line: Line buffer (kallsyms format: address type name).
@@ -493,7 +529,7 @@ static inline int parse_kallsyms_line(const char *restrict line, const char *res
 static int parse_kallsyms(struct lemon_ctx *restrict ctx) {
     FILE *fp;
     char line[256];
-    __u8 *data = NULL;
+    const unsigned char *data = NULL;
     uintptr_t current_symb_addr = 0;
     int err;
     size_t linux_banner_len;
