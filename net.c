@@ -1,83 +1,99 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <string.h>
+#include <stdlib.h>
 
 #include "lemon.h"
 
-extern int dump(const struct options *restrict opts, const struct ram_regions *restrict ram_regions, int (*write_f)(void *restrict, const void *restrict, const unsigned long), void *restrict args);
+/*
+ * net.c - TCP client dump path: connect to ctx->opts.address:port and stream dump().
+ */
 
-/* Arguments passed to write_on_socket() */
+extern int dump(const struct lemon_ctx *restrict ctx, int (*write_f)(void *restrict, const void *restrict, const unsigned long), void *restrict args);
+
+/* File descriptor wrapper for write_on_socket() / dump(). */
 struct net_args {
     int sockfd;
 };
 
 /*
- * write_on_socket() - Sends data over a TCP socket.
- * @args: pointer to an integer file descriptor (the socket)
- * @data: pointer to the buffer to send
- * @size: number of bytes to send
+ * write_on_socket() - write(2) loop over a connected TCP socket
+ * @args: Pointer to struct net_args (sockfd).
+ * @data: Payload or NULL for zero-filled malloc buffer of @size bytes.
+ * @size: Bytes to send.
  *
- * Returns 0 on success.
+ * Returns 0 on success, or errno on failure.
  */
-int write_on_socket(void *restrict args, const void *restrict data, const unsigned long size) {
-    unsigned long r;
+static int write_on_socket(void *restrict args, const void *restrict data, const unsigned long size) {
+    ssize_t r;
     unsigned long total;
     struct net_args *net_args = (struct net_args *)args;
+    void *dummy_buffer = NULL;
+    int ret = 0;
 
-        total = r = 0;
-        while(total < size) {
-            r = write(net_args->sockfd, data + total, size - total);
-            if(r == -1) {
-                if(errno == EINTR) continue;
-                perror("Fail to write on socket");
-                return errno;
-            }
-            
-            total += r;
+    /* NULL data means the eBPF read was skipped or failed: send zeros instead. */
+    if(data == NULL && size > 0) {
+        dummy_buffer = malloc(size);
+        if(dummy_buffer == NULL) {
+            RETURN_ERRNO("Fail to allocate dummy buffer");
         }
+        memset(dummy_buffer, 0x00, size);
+        data = dummy_buffer;
+    }
 
-    return 0;
+    total = r = 0;
+    while(total < size) {
+        r = write(net_args->sockfd, data + total, size - total);
+        if(r == -1) {
+            if(errno == EINTR) continue;
+            ret = errno;
+            ERRNO("Fail to write on socket");
+            goto cleanup;
+        }
+        
+        total += r;
+    }
+
+    cleanup:
+        if(dummy_buffer) free(dummy_buffer);
+
+    return ret;
 }
 
 /*
- * dump_on_net() - Sends the memory dump over the network.
- * @opts: user-provided options, including destination address
- * @ram_regions: memory regions to dump
+ * dump_on_net() - socket + connect + dump(); close preserves first error
+ * @ctx: Network mode options (address in network byte order, port).
  *
- * On success, it returns 0. On failure, a negative value or errno is returned.
+ * Returns 0 on success, or errno (always non-negative here) on failure.
  */
-int dump_on_net(const struct options *restrict opts, const struct ram_regions *restrict ram_regions) {
+int dump_on_net(const struct lemon_ctx *restrict ctx) {
     int sockfd;
     struct sockaddr_in dest_addr;
     struct net_args net_args;
     int ret;
 
-    /* Create socket */
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0) {
-        perror("Fail to open network socket");
-        return errno;
+        RETURN_ERRNO("Fail to open network socket");
     }
 
-    /* Setup destination address */
     dest_addr.sin_family = AF_INET;
-    dest_addr.sin_port = htons(opts->port);
-    dest_addr.sin_addr.s_addr = opts->address;
+    dest_addr.sin_port = htons(ctx->opts.port);
+    dest_addr.sin_addr.s_addr = ctx->opts.address; /* Already network byte order from inet_pton. */
 
-    /* Connect to the destination */
     if ((ret = connect(sockfd, (struct sockaddr *)&dest_addr, sizeof(dest_addr))) < 0) {
-        perror("Fail to connect to remote host");
-        return errno;
+        ret = errno;
+        ERRNO("Fail to connect to remote host");
+        close(sockfd);
+        return ret;
     }
 
-    /* Setup arguments for write_on_socket */
     net_args.sockfd = sockfd;
+    ret = dump(ctx, write_on_socket, (void *)&net_args);
 
-    /* Dump! */
-    ret = dump(opts, ram_regions, write_on_socket, (void *)&net_args);
-
-    if(sockfd) {
-        if(close(sockfd)) { perror("Fail to close the connection"); ret = errno; }
+    if(sockfd >= 0) {
+        if(close(sockfd)) { if (!ret) ret = errno; ERRNO("Fail to close the connection"); }
     }
     
     return ret;

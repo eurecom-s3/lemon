@@ -1,8 +1,15 @@
 # LEMON - An eBPF Memory Dump Tool for x64 and ARM64 Linux and Android
 
+![GitHub Actions Workflow Status](https://img.shields.io/github/actions/workflow/status/eurecom-s3/lemon/build.yaml) [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/eurecom-s3/lemon)
+
 LEMON is a Linux and Android memory dump tool that utilizes eBPF to capture the entire physical memory of a system and save it in LiME format, compatible with forensic tools such as Volatility 3.
 
 LEMON is available as a precompiled static binary for x64 and ARM64, leveraging a CO-RE (Compile Once, Run Everywhere) eBPF program. This allows analysts to dump system memory without compiling anything on the target machine, checking for specific compatibility with installed libraries and kernel versions, and without requiring kernel headers. It is particularly useful in scenarios where loading kernel modules is not possible (e.g., due to Secure Boot) or when `{/proc, /dev}/kcore` is unavailable. If CO-RE is not available on the target machine a universal kernel-independent no CO-RE version of lemon can be run on it.
+
+> [!warning]
+> This tool is a research project and is not intended for production use.  The authors assume no responsibility for data loss, system instability, crashes, reboots, or any other unintended effects resulting from its use.
+>
+> On devices equipped with Exynos or MediaTek SoCs that enforce protections at EL2 (hypervisor level), this tool may trigger unexpected system reboots. While the issue has been resolved on Qualcomm-based devices, it remains unaddressed for Exynos and MediaTek platforms due to the lack of access to suitable test hardware. If you own one of these devices and are willing to assist with testing, please get in touch.
 
 ## Usage
 
@@ -66,6 +73,8 @@ Other distributions provide equivalent packages, which at minimum allow compilin
 - [X] Implement network dump (TCP)
 - [X] Implement dump with reduced granule if page fail to be read
 - [X] Introduce support for kernels that do not have uprobes
+- [ ] Support for Exynos SoCs
+- [ ] Support for Mediatek SoCs
 - [ ] Support other CPU architectures (x32, ARM32, MIPS, PowerPC, POWER, RISC-V)
 - [ ] Use of `_stext` in x64 to bypass missing `CONFIG_KALLSYMS_ALL`
 - [ ] Bruteforce scanning (?) for page containing same data of  `_stext` page in ARM64 to bypass missing `CONFIG_KALLSYMS_ALL`
@@ -86,3 +95,15 @@ Other distributions provide equivalent packages, which at minimum allow compilin
 - Android 13 support BTF 5.15
 - Introduction of SYSCALL program type 5.15
 - Introduction of kallsyms() in ebpf 5.16
+
+### Related Projects
+
+The following additional tools can be used to enable memory analysis of Linux and Android devices:
+
+- [btf2json](https://github.com/eurecom-s3/lemon-btf2json)  
+  Converts Linux BTF debug information into JSON profiles compatible with Volatility 3.
+
+- [volatility3-arm64](https://github.com/eurecom-s3/volatility3-arm64)  
+  Extended version of Volatility 3 with support for ARM64 memory analysis.
+
+These components are used together with LEMON to generate and analyze memory dumps on modern Android and Linux systems
