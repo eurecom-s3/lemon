@@ -1,57 +1,35 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/capability.h>
+#include <string.h>
 
 #include "lemon.h"
 
-/*  Minimal capabilities required by LEMON:
- * 
- *  CAP_BPF          -> needed to load the eBPF components (on older kernels is included in CAP_SYS_ADMIN)
- *  CAP_PERFMON      -> needed to change RLIMIT_MEMLOCK, from libbpf, bypassable?, (on older kernel is included in CAP_SYS_ADMIN)
- *  CAP_SYSLOG       -> read addresses from /proc/kallsyms
- * 
- *  Capabilities needed in some cases
- *  
- *  CAP_SYS_ADMIN    -> needed to change /proc/sys/kernel/kptr_restrict from 2 to 0 (not needed if set to 1 or 0), needed to access
- *                      /proc/iomem if CONFIG_KALLSYMS_ALL is not active and so iomem_resources is not available, needed on old kernels
- *  CAP_DAC_OVERRIDE -> needed to create a brand new dump file in the case the directory is not owned by the user running LEMON
+/*
+ * capabilities.c - Effective capability checks via libcap (ctx->capabilities from cap_get_proc).
+ *
+ * Typical needs:
+ *   CAP_BPF / CAP_SYS_ADMIN - load eBPF (older kernels fold BPF into SYS_ADMIN).
+ *   CAP_PERFMON / CAP_SYS_ADMIN - raise RLIMIT_MEMLOCK for libbpf.
+ *   CAP_SYSLOG - read symbol addresses from /proc/kallsyms when restricted.
+ *   CAP_SYS_ADMIN - relax kptr_restrict, read /proc/iomem if iomem_resource is missing.
+ *   CAP_DAC_OVERRIDE - create dump files in directories not owned by the caller.
  */
-
 
 /*
- * check_capability() - Checks if the current process has a specific effective capability
- * @cap: The capability to check (e.g., CAP_SYS_PTRACE, CAP_NET_ADMIN)
+ * check_capability() - Test one capability in the effective set
+ * @ctx: Must have ctx->capabilities initialized (cap_get_proc in collect_system_info).
+ * @cap: Linux capability constant (e.g. CAP_SYS_ADMIN).
  *
- * Retrieves the current process's capabilities using libcap, checks whether the given
- * capability is present in the effective set, and returns the result.
- * Returns 1 if the capability is set, 0 if not set, and a negative errno value on error.
+ * Returns 1 if set, 0 if unset, or an errno value (> 1) if cap_get_flag fails.
  */
-int check_capability(const cap_value_t cap) {
-    cap_t caps;
+int check_capability(const struct lemon_ctx *restrict ctx, cap_value_t cap) {
     cap_flag_value_t cap_flag;
-    int ret = 0;
-
-    /* Get process capabilities */
-    caps = cap_get_proc();
-    if (caps == NULL) {
-        perror("Fail to get current capabilities");
-        return -errno;
-    }
-
 
     /* Get effective capabilities */
-    if (cap_get_flag(caps, cap, CAP_EFFECTIVE, &cap_flag) == -1) {
-        perror("Fail to get effective capabilities");
-        ret = -errno;
-        goto cleanup;
+    if (cap_get_flag(ctx->capabilities, cap, CAP_EFFECTIVE, &cap_flag) == -1) {
+        RETURN_ERRNO("Fail to get effective capabilities");
     }
 
-    cleanup:
-        if((ret = cap_free(caps))) {
-            perror("Fail to free capabilities struct");
-            return -errno;
-        };
-
-    if(!ret) ret = (cap_flag == CAP_SET);
-    return ret;
+    return(cap_flag == CAP_SET);
 }
