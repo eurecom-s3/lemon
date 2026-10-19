@@ -12,7 +12,7 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v3
+      uses: actions/checkout@v7
     
     - name: Install dependencies from apt
       run: |
@@ -32,14 +32,14 @@ jobs:
         make MODE=core STATIC=1
     
     - name: Upload x64 CORE binary
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
           name: lemon.core.x86_64
           path: "lemon.core.x86_64"
       continue-on-error: true
 
     - name: Upload ARM64 CORE binary
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
           name: lemon.core.aarch64
           path: "lemon.core.aarch64"
@@ -51,14 +51,14 @@ jobs:
       run: |
         make MODE=nocoreuni STATIC=1
     - name: Upload x64 NO-CORE universal binary
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
           name: lemon.nocoreuni.x86_64
           path: "lemon.nocoreuni.x86_64"
       continue-on-error: true
 
     - name: Upload ARM64 NO-CORE universal binary
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
           name: lemon.nocoreuni.aarch64
           path: "lemon.nocoreuni.aarch64"
@@ -72,7 +72,7 @@ jobs:
         os: [ubuntu-24.04]
     steps:
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
       - name: Run dump to disk
         run: |
           sudo chmod +x ./lemon.core.$(uname -m)/lemon.core.$(uname -m)
