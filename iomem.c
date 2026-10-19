@@ -154,7 +154,7 @@ static void range_merge_overlaps(struct ram_regions *list) {
  * @ram: System RAM intervals.
  * @not_ram: Reserved / non-RAM intervals to carve out.
  * 
- *  This function is not currently in use. Filtering for annidated reserved regions seems to be usefull
+ *  This function is not currently in use. Filtering for nested reserved regions seems to be useful
  *  to prevent crashes in other SoCs such as Mediatek and Exynos in Samsung phones.
  */
 static __attribute__((unused)) void range_subtract(struct lemon_ctx *ctx, struct ram_regions *ram, struct ram_regions *not_ram) {

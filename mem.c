@@ -598,7 +598,7 @@ static int parse_kallsyms(struct lemon_ctx *restrict ctx) {
                 return err;
             }
             
-            /* Banner ends with  new line, we replace it with a NULL */
+            /* Banner ends with a new line, we replace it with a NUL */
             char *newline = strchr((char *)data, '\n');
             if(newline) *newline = '\0';
 
@@ -618,7 +618,7 @@ static int parse_kallsyms(struct lemon_ctx *restrict ctx) {
 
             strncpy(ctx->linux_banner, (char *)data, linux_banner_len);
             
-            DBG("Linux banner 0x%s", ctx->linux_banner);
+            DBG("Linux banner %s", ctx->linux_banner);
             continue;
         }
 

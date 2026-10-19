@@ -84,7 +84,7 @@ clean:
 # Help target
 help:
 	@echo "Available targets:"
-	@echo "  all     - Build the project (default, core, dynamic linked)"
+	@echo "  all     - Build the project (default, core, dynamically linked)"
 	@echo "  static  - Build with static linking"
 	@echo "  clean   - Clean build artifacts"
 	@echo "  vmlinux - Generate vmlinux.h (for core mode)"

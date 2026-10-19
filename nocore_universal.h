@@ -1,5 +1,5 @@
 /*
- * Definition contained in kernel source code, we report them here to produce
+ * Definitions contained in kernel source code, we report them here to produce
  * a universal no CO-RE binary, which is compatible with all no CO-RE kernels.
  *	  
  */
@@ -141,7 +141,7 @@ enum { /* From Linux source include/uapi/linux/bpf.h */
 	BPF_F_NO_USER_CONV	= (1U << 18),
 };
 
-/* XDP struct. As specified in include/uapi/linux/bpf.h this struct is back compatible because we fields are add at the end */
+/* XDP struct. As specified in include/uapi/linux/bpf.h this struct is backward compatible because new fields are added at the end */
 struct xdp_md {
 	__u32 data;
 	__u32 data_end;

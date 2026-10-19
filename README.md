@@ -43,11 +43,11 @@ nc -l -p TARGET_PORT >  memory_by_net.dump
 ```
 
 This generates a `memory.dump` file in LiME format, containing all physical memory pages. Since running eBPF programs typically requires root privileges, LEMON must be executed as `root` or with an appropriate `sudo` configuration.
-Sometimes LEMON returns reading error on a 2MB block of pages: it is normal and due to KFENCE security infrastructure of the kernel.  
+Sometimes LEMON returns a read error on a 2MB block of pages: it is normal and due to the KFENCE security infrastructure of the kernel.  
 
 ## Build
 
-Precompiled static binaries are available in this repository (check the Github actions tab) or in the release section. Analysts can also compile LEMON themselves, either dynamically or statically. The dynamic version requires the presence of `libbpf`, `libz`, `libelf`, `libzstd` and `libcap` on the target machine, whereas the static version has no external dependencies. Note that the build machine **MUST** have the same CPU architecture as the target.
+Precompiled static binaries are available in this repository (check the GitHub Actions tab) or in the release section. Analysts can also compile LEMON themselves, either dynamically or statically. The dynamic version requires the presence of `libbpf`, `libz`, `libelf`, `libzstd` and `libcap` on the target machine, whereas the static version has no external dependencies. Note that the build machine **MUST** have the same CPU architecture as the target.
 
 ### Dependencies
 
@@ -94,7 +94,7 @@ Other distributions provide equivalent packages, which at minimum allow compilin
 
 ## Notes
 
-### eBPF cronology
+### eBPF chronology
 - Introduction of eBPF: 3.15
 - Introduction of Array maps 3.19
 - Introduction of kProbe/uProbe support 4.1
@@ -102,7 +102,7 @@ Other distributions provide equivalent packages, which at minimum allow compilin
 - Introduction of XDP 4.8
 - Android 9 support eBPF: 4.9
 - Introduction of BTF 4.18
-- Introduction mmap() support for array maps 5.5
+- Introduction of mmap() support for array maps 5.5
 - !!! Introduction of read_kernel() 5.5 <==== Minimum Lemon target version
 - Introduction of ring_buffer 5.8
 - Android 13 support BTF 5.15
@@ -119,4 +119,4 @@ The following additional tools can be used to enable memory analysis of Linux an
 - [volatility3-arm64](https://github.com/eurecom-s3/volatility3-arm64)  
   Extended version of Volatility 3 with support for ARM64 memory analysis.
 
-These components are used together with LEMON to generate and analyze memory dumps on modern Android and Linux systems
+These components are used together with LEMON to generate and analyze memory dumps on modern Android and Linux systems.

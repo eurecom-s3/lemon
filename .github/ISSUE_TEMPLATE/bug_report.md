@@ -20,7 +20,7 @@ Describe clearly what you expected LEMON to do.
 
 Example:
 - Successful build
-- Correct dump of process memory
+- Correct dump of physical memory
 
 ## Current Behavior
 
@@ -43,7 +43,7 @@ Provide detailed environment information.
 | Linux distribution       | (e.g., Ubuntu 22.04, Android 16) |
 | Kernel version           | (`uname -r`) |
 | Architecture             | (e.g., x86_64, ARM) |
-| LEMON version      | (`lemon_bin --version`) |
+| LEMON version      | (`lemon_bin --help`, see the `Version` line) |
 
 
 ### Steps to Reproduce

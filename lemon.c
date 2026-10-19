@@ -67,9 +67,9 @@ static const struct argp_option options[] = {
     
     {0, 0, 0, OPTION_DOC, "Advanced options:", 3},
     {"debug",     'g', 0,               0, "Enable debug prints ", 3},
-    {"xdp",       'x', 0,               0, "Force the use of XDP instead UPROBE as eBPF trigger", 3},
+    {"xdp",       'x', 0,               0, "Force the use of XDP instead of UPROBE as eBPF trigger", 3},
     {"iomem_user",'u', 0,               0, "Force the read of /proc/iomem instead of kernel struct resource ", 3},
-    {"dryrun",    'y', 0,               0, "Simulate a dump (not read the physical memory)", 3},
+    {"dryrun",    'y', 0,               0, "Simulate a dump (do not read the physical memory)", 3},
     {"huge",      'H', 0,               0, "Use huge pages (2MB) instead of 4KB", 3},
     {"qcom",      'q', 0,               0, "Force the use of Qualcomm quirks", 3},
     {"rphy",     'r', "ADDRESS:SIZE",  0, "Dump physical pages range", 3},
