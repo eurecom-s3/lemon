@@ -95,19 +95,29 @@ Other distributions provide equivalent packages, which at minimum allow compilin
 ## Notes
 
 ### eBPF chronology
-- Introduction of eBPF: 3.15
-- Introduction of Array maps 3.19
-- Introduction of kProbe/uProbe support 4.1
-- Introduction of tracepoint support (syscalls tracing) 4.7
-- Introduction of XDP 4.8
-- Android 9 support eBPF: 4.9
-- Introduction of BTF 4.18
-- Introduction of mmap() support for array maps 5.5
-- !!! Introduction of read_kernel() 5.5 <==== Minimum Lemon target version
-- Introduction of ring_buffer 5.8
-- Android 13 support BTF 5.15
-- Introduction of SYSCALL program type 5.15
-- Introduction of kallsyms() in ebpf 5.16
+
+Kernel versions in which the eBPF features relevant to LEMON were introduced:
+
+| Kernel | Feature |
+|--------|---------|
+| 3.15 | `bpf()` syscall and first eBPF maps (hash) |
+| 3.19 | Array maps |
+| 4.1-4.3 | kprobe/uprobe programs |
+| 4.7 | Tracepoint programs (syscall tracing) |
+| 4.8 | XDP |
+| 4.18 | BTF |
+| 5.5 | `mmap()` support for array maps |
+| **5.5** | **`bpf_probe_read_kernel()`: minimum kernel version targeted by LEMON** |
+| 5.8 | Ring buffer |
+| 5.15 | `SYSCALL` program type |
+| 5.16 | `bpf_kallsyms_lookup_name()` helper |
+
+Android milestones:
+
+| Android | Kernel | Support |
+|---------|--------|---------|
+| 9 | 4.9 | eBPF |
+| 13 | 5.15 | BTF |
 
 ### Related Projects
 
