@@ -165,6 +165,20 @@ typedef struct __attribute__((packed)) {
     unsigned char reserved[8];      /* Zeroed. */
 } lime_header;
 
+/* Physical-to-virtual offset: x86_64 uses unsigned linear-map base; arm64 uses signed memstart_addr. */
+#ifdef __TARGET_ARCH_x86
+typedef uintptr_t v2p_offset_t;     /* page_offset_base from kallsyms. */
+#elif __TARGET_ARCH_arm64
+typedef int64_t v2p_offset_t;       /* memstart_addr from kallsyms (negative on typical systems). */
+#endif
+
+/*
+ * Sentinel for lemon_ctx.v2p_offset while it is still unknown. 0 is a valid value (arm64
+ * memstart_addr when DRAM starts at physical 0); -1 never is, since both page_offset_base
+ * and memstart_addr are page aligned.
+ */
+#define V2P_OFFSET_UNSET        ((v2p_offset_t)-1)
+
 /* Global runtime state for one LEMON invocation. */
 struct lemon_ctx {
     struct options opts;            /* Parsed CLI options. */
@@ -197,12 +211,7 @@ struct lemon_ctx {
     unsigned long va_bits_config;   /* CONFIG_ARM64_VA_BITS from .kconfig (0 if absent). */
     char *linux_banner;     /* Linux banner needed to create a valid profile */
 
-    /* Physical-to-virtual offset: x86_64 uses unsigned linear-map base; arm64 uses signed memstart_addr. */
-    #ifdef __TARGET_ARCH_x86
-        uintptr_t v2p_offset;   /* page_offset_base from kallsyms. */
-    #elif __TARGET_ARCH_arm64
-        int64_t v2p_offset;     /* memstart_addr from kallsyms (negative on typical systems). */
-    #endif
+    v2p_offset_t v2p_offset;    /* Physical-to-virtual offset; V2P_OFFSET_UNSET until parse_kallsyms(). */
     uintptr_t mem_section;  /* Kernel VA of mem_section[] array; used by Qualcomm vmemmap logic. */
 };
 

@@ -338,6 +338,7 @@ static int init_context(struct lemon_ctx *restrict ctx) {
     ctx->opts.dump_mode = MODE_UNDEFINED;
     ctx->opts.port = DEFAULT_PORT;
     ctx->original_kptr = -1;    /* Sentinel: kptr not yet read. */
+    ctx->v2p_offset = V2P_OFFSET_UNSET;
     TAILQ_INIT(&ctx->ram_regions);
 
     return 0;

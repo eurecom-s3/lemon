@@ -43,7 +43,7 @@ Provide detailed environment information.
 | Linux distribution       | (e.g., Ubuntu 22.04, Android 16) |
 | Kernel version           | (`uname -r`) |
 | Architecture             | (e.g., x86_64, ARM) |
-| LEMON version      | (`lemon_bin --help`, see the `Version` line) |
+| LEMON version      | (`./lemon.MODE.ARCH --help`, see the `Version` line) |
 
 
 ### Steps to Reproduce

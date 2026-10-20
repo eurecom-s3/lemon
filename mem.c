@@ -496,6 +496,7 @@ int fill_mem_result_buf(const char* pattern, size_t pattern_size, size_t chunk_s
         memcpy(read_mem_result->buf + i, pattern, size);
     }
 
+    *data = read_mem_result->buf;
     return 0;
 }
 /*
@@ -532,7 +533,6 @@ static int parse_kallsyms(struct lemon_ctx *restrict ctx) {
     const unsigned char *data = NULL;
     uintptr_t current_symb_addr = 0;
     int err;
-    size_t linux_banner_len;
 
     /* uintptr_t and int64_t must match for mixed x86/arm offset reads. */
     _Static_assert(sizeof(uintptr_t) == sizeof(int64_t), "sizeof(uintptr_t) != sizeof(int64_t)");
@@ -558,7 +558,7 @@ static int parse_kallsyms(struct lemon_ctx *restrict ctx) {
     while (fgets(line, sizeof(line), fp)) {
 
         /* Early exit once iomem root, phys offset, and mem_section are known. */
-        if(ctx->iomem_resource && ctx->v2p_offset && ctx->mem_section && ctx->linux_banner) break;
+        if(ctx->iomem_resource && ctx->v2p_offset != V2P_OFFSET_UNSET && ctx->mem_section && ctx->linux_banner) break;
 
         /* Root of kernel struct resource tree (optional path for RAM discovery). */
         if(!ctx->iomem_resource && parse_kallsyms_line(line, "iomem_resource", &current_symb_addr)) {
@@ -567,18 +567,14 @@ static int parse_kallsyms(struct lemon_ctx *restrict ctx) {
             continue;
         }
 
-        if(!ctx->v2p_offset && parse_kallsyms_line(line, v2p_symbol, &current_symb_addr)) {
+        if(ctx->v2p_offset == V2P_OFFSET_UNSET && parse_kallsyms_line(line, v2p_symbol, &current_symb_addr)) {
 
             /* Dereference the kernel symbol to get page_offset_base / memstart_addr. */
-            if((err = read_kernel_memory(current_symb_addr, sizeof(uintptr_t), &data))) {
+            if((err = read_kernel_memory(current_symb_addr, sizeof(v2p_offset_t), &data))) {
                 fclose(fp);
                 return err;
             }
-            #ifdef __TARGET_ARCH_x86
-                ctx->v2p_offset = *((uintptr_t *)data);
-            #elif __TARGET_ARCH_arm64
-                ctx->v2p_offset = *((int64_t *)data);
-            #endif
+            ctx->v2p_offset = *((v2p_offset_t *)data);
 
             DBG("v2p_offset 0x%lx", ctx->v2p_offset);
             continue;
@@ -602,22 +598,20 @@ static int parse_kallsyms(struct lemon_ctx *restrict ctx) {
             char *newline = strchr((char *)data, '\n');
             if(newline) *newline = '\0';
 
-            linux_banner_len = strnlen((char *)data, MAX_LINUX_BANNER_LEN);
-            if(!linux_banner_len) {
+            if(!*(char *)data) {
                 ERR("Linux banner has 0 len");
                 fclose(fp);
                 return EINVAL;
             }
 
-            ctx->linux_banner = (char *)malloc(linux_banner_len + 1);
+            /* strndup() always NUL-terminates, even when the banner fills MAX_LINUX_BANNER_LEN. */
+            ctx->linux_banner = strndup((char *)data, MAX_LINUX_BANNER_LEN);
             if(!ctx->linux_banner) {
                 ERR("Fail allocating Linux banner buffer");
                 fclose(fp);
                 return errno;
             }
 
-            strncpy(ctx->linux_banner, (char *)data, linux_banner_len);
-            
             DBG("Linux banner %s", ctx->linux_banner);
             continue;
         }
@@ -629,7 +623,7 @@ static int parse_kallsyms(struct lemon_ctx *restrict ctx) {
     }
 
     /* v2p_offset is mandatory for phys_to_virt(). */
-    if (!ctx->v2p_offset)
+    if (ctx->v2p_offset == V2P_OFFSET_UNSET)
     {
         ERR("Symbol %s not found in /proc/kallsyms", v2p_symbol);
         return EIO;

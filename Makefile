@@ -85,7 +85,6 @@ clean:
 help:
 	@echo "Available targets:"
 	@echo "  all     - Build the project (default, core, dynamically linked)"
-	@echo "  static  - Build with static linking"
 	@echo "  clean   - Clean build artifacts"
 	@echo "  vmlinux - Generate vmlinux.h (for core mode)"
 	@echo "  help    - Show this help"
@@ -107,7 +106,7 @@ help:
 config:
 	@echo "Current configuration:"
 	@echo "  MODE: $(MODE)"
-	@echo "  STATIC: $(if $(STATIC),enabled,disabled)"
+	@echo "  STATIC: $(if $(filter 1,$(STATIC)),enabled,disabled)"
 	@echo "  ARCH: $(ARCH)"
 	@echo "  TARGET_ARCH: $(TARGET_ARCH)"
 	@echo "  NEEDS_VMLINUX: $(NEEDS_VMLINUX)"
@@ -115,4 +114,4 @@ config:
 	@echo "  BPF_FLAGS: $(BPF_FLAGS)"
 	@echo "  LDFLAGS: $(LDFLAGS)"
 
-.PHONY: all static clean vmlinux help config
+.PHONY: all clean vmlinux help config
