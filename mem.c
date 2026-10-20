@@ -589,27 +589,26 @@ static int parse_kallsyms(struct lemon_ctx *restrict ctx) {
 
         /* Get the Linux banner string */
         if(!ctx->linux_banner && parse_kallsyms_line(line, "linux_banner", &current_symb_addr)) {
+            /* The banner is optional: on failure warn and carry on without it. */
             if((err = read_kernel_memory(current_symb_addr, MAX_LINUX_BANNER_LEN, &data))) {
-                fclose(fp);
-                return err;
+                WARN("Failed to read Linux banner (error %d), continuing without it", err);
+                continue;
             }
-            
+
             /* Banner ends with a new line, we replace it with a NUL */
-            char *newline = strchr((char *)data, '\n');
+            char *newline = memchr((char *)data, '\n', MAX_LINUX_BANNER_LEN);
             if(newline) *newline = '\0';
 
             if(!*(char *)data) {
-                ERR("Linux banner has 0 len");
-                fclose(fp);
-                return EINVAL;
+                WARN("Linux banner has 0 len, continuing without it");
+                continue;
             }
 
             /* strndup() always NUL-terminates, even when the banner fills MAX_LINUX_BANNER_LEN. */
             ctx->linux_banner = strndup((char *)data, MAX_LINUX_BANNER_LEN);
             if(!ctx->linux_banner) {
-                ERR("Fail allocating Linux banner buffer");
-                fclose(fp);
-                return errno;
+                WARN("Fail allocating Linux banner buffer, continuing without it");
+                continue;
             }
 
             DBG("Linux banner %s", ctx->linux_banner);
