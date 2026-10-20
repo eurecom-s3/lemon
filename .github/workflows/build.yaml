@@ -8,7 +8,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-24.04-arm, ubuntu-24.04]
+        os: [ubuntu-22.04, ubuntu-22.04-arm, ubuntu-24.04, ubuntu-24.04-arm, ubuntu-26.04, ubuntu-26.04-arm]
 
     steps:
     - name: Checkout repository
@@ -18,12 +18,19 @@ jobs:
       run: |
         sudo apt update
         sudo apt install -y make llvm libbpf-dev libcap-dev linux-tools-generic
+        # Newer Ubuntu releases ship bpftool as a separate package, older ones don't have it
+        sudo apt install -y bpftool || true
     
     # FIXME: With newer Ubuntu runners this should become useless hopefully
     - name: Find bpftool
       id: find-bpftool
       run: |
-        echo "bpftool=$(find -L /usr/lib/linux-tools/ -maxdepth 2 -mindepth 2 -name bpftool | head -n1)" >> $GITHUB_OUTPUT
+        # Prefer bpftool from PATH (separate package on newer Ubuntu), else look under linux-tools
+        if bpftool version > /dev/null 2>&1; then
+          echo "bpftool=$(command -v bpftool)" >> $GITHUB_OUTPUT
+        else
+          echo "bpftool=$(find -L /usr/lib/linux-tools/ -maxdepth 2 -mindepth 2 -name bpftool | head -n1)" >> $GITHUB_OUTPUT
+        fi
 
     - name: Compile with Make
       env:
@@ -33,6 +40,7 @@ jobs:
     
     - name: Upload x64 CORE binary
       uses: actions/upload-artifact@v7
+      if: matrix.os == 'ubuntu-24.04' || matrix.os == 'ubuntu-24.04-arm'
       with:
           name: lemon.core.x86_64
           path: "lemon.core.x86_64"
@@ -40,6 +48,7 @@ jobs:
 
     - name: Upload ARM64 CORE binary
       uses: actions/upload-artifact@v7
+      if: matrix.os == 'ubuntu-24.04' || matrix.os == 'ubuntu-24.04-arm'
       with:
           name: lemon.core.aarch64
           path: "lemon.core.aarch64"
@@ -52,6 +61,7 @@ jobs:
         make MODE=nocoreuni STATIC=1
     - name: Upload x64 NO-CORE universal binary
       uses: actions/upload-artifact@v7
+      if: matrix.os == 'ubuntu-24.04' || matrix.os == 'ubuntu-24.04-arm'
       with:
           name: lemon.nocoreuni.x86_64
           path: "lemon.nocoreuni.x86_64"
@@ -59,6 +69,7 @@ jobs:
 
     - name: Upload ARM64 NO-CORE universal binary
       uses: actions/upload-artifact@v7
+      if: matrix.os == 'ubuntu-24.04' || matrix.os == 'ubuntu-24.04-arm'
       with:
           name: lemon.nocoreuni.aarch64
           path: "lemon.nocoreuni.aarch64"
@@ -69,7 +80,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-24.04]
+        os: [ubuntu-22.04, ubuntu-24.04, ubuntu-26.04]
     steps:
       - name: Download artifacts
         uses: actions/download-artifact@v8
