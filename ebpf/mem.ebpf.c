@@ -5,7 +5,11 @@
  */
 
 #ifdef CORE
+    /* The generated vmlinux.h has forward declarations that trigger this warning */
+    #pragma clang diagnostic push
+    #pragma clang diagnostic ignored "-Wmissing-declarations"
     #include "../vmlinux.h"
+    #pragma clang diagnostic pop
     #include <bpf/bpf_core_read.h>
 
     #ifndef ETH_P_IP
